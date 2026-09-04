@@ -3,22 +3,51 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "tsx scripts/ensure-server-cli.ts",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:serve": "tsx scripts/pglite-server.ts",
+    "predb:generate": "tsx scripts/ensure-server-cli.ts",
+    "db:generate": "drizzle-kit generate",
+    "predb:migrate": "tsx scripts/ensure-server-cli.ts",
+    "db:migrate": "drizzle-kit migrate",
+    "db:seed": "tsx scripts/seed.ts",
+    "db:query": "tsx scripts/query.ts",
+    "db:reset-data": "tsx scripts/reset-data.ts",
+    "db:sample-events": "tsx scripts/sample-events.ts",
+    "db:list-contacts": "tsx scripts/list-contacts.ts",
+    "db:list-people": "tsx scripts/list-people.ts",
+    "db:list-dismissed-merges": "tsx scripts/list-dismissed-merges.ts",
+    "db:list-pending": "tsx scripts/list-pending.ts",
+    "db:list-purged": "tsx scripts/list-purged.ts",
+    "db:counts": "tsx scripts/counts.ts",
+    "db:suggest-merges": "tsx scripts/suggest-merges.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-pgvector": "^0.0.9",
+    "@electric-sql/pglite-socket": "^0.2.11",
+    "drizzle-orm": "^0.45.2",
+    "googleapis": "^178.0.0",
     "next": "16.3.4",
+    "pg": "^8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
-    "typescript": "^5"
+    "tsx": "^4.23.13",
+    "typescript": "^5",
+    "vitest": "^4.1.11"
   }
 }

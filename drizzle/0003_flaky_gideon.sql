@@ -1,0 +1,1 @@
+ALTER TABLE "oauth_account" ADD COLUMN "last_synced_date" text;
