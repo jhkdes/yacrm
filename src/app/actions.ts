@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/db/client";
 import { purgeContact, unpurgeIdentifier } from "@/lib/contact-purge";
 import { ImportSummary, importGmailHistory, syncGmailHistory } from "@/lib/gmail-import";
+import { approveAndSendDraft } from "@/lib/gmail-send";
 import {
   dismissMergeSuggestion,
   undismissMergeSuggestion,
@@ -25,6 +26,7 @@ function summaryToSearchParams(summary: ImportSummary): URLSearchParams {
     import_contacts_excluded_bulk: String(summary.contactsExcludedBulkSender),
     import_contacts_pending: String(summary.contactsPending),
     import_contacts_promoted: String(summary.contactsPromoted),
+    import_events_embedded: String(summary.eventsEmbedded),
   });
 }
 
@@ -233,6 +235,62 @@ export async function acceptAllMergesAction(formData: FormData) {
     redirectTarget = `/merges?merge_error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function sendDraftAction(formData: FormData) {
+  const personId = Number(formData.get("personId"));
+  const contactId = Number(formData.get("contactId"));
+  const subject = formData.get("subject");
+  const body = formData.get("body");
+  const goal = formData.get("goal");
+  const personName = formData.get("personName");
+
+  const draftUrl = (extra: Record<string, string>) =>
+    `/campaigns/draft?${new URLSearchParams({
+      personId: String(personId),
+      goal: typeof goal === "string" ? goal : "",
+      ...extra,
+    }).toString()}`;
+
+  if (
+    !Number.isInteger(personId) ||
+    !Number.isInteger(contactId) ||
+    typeof subject !== "string" ||
+    !subject ||
+    typeof body !== "string" ||
+    !body ||
+    typeof goal !== "string" ||
+    !goal
+  ) {
+    redirect(draftUrl({ sendError: "invalid_send_request" }));
+  }
+
+  const account = await findGmailAccount();
+  if (!account) {
+    redirect(draftUrl({ sendError: "no_gmail_account" }));
+  }
+
+  let redirectTarget: string;
+  try {
+    await approveAndSendDraft(
+      account.id,
+      contactId,
+      personId,
+      subject as string,
+      body as string,
+    );
+    redirectTarget = `/campaigns?${new URLSearchParams({
+      goal: goal as string,
+      sent: typeof personName === "string" ? personName : "1",
+    }).toString()}`;
+  } catch (err) {
+    console.error("Draft send failed", err);
+    redirectTarget = draftUrl({
+      sendError: err instanceof Error ? err.message : "unknown_error",
+    });
   }
 
   redirect(redirectTarget);

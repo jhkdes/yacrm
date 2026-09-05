@@ -24,10 +24,15 @@
     "db:list-purged": "tsx scripts/list-purged.ts",
     "db:counts": "tsx scripts/counts.ts",
     "db:suggest-merges": "tsx scripts/suggest-merges.ts",
+    "db:verify-embeddings": "tsx scripts/verify-embeddings.ts",
+    "db:rank-campaign": "tsx scripts/rank-campaign.ts",
+    "db:backfill-embeddings": "tsx scripts/backfill-embeddings.ts",
+    "db:generate-draft": "tsx scripts/generate-draft.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.123.0",
     "@electric-sql/pglite": "^0.5.8",
     "@electric-sql/pglite-pgvector": "^0.0.9",
     "@electric-sql/pglite-socket": "^0.2.11",
@@ -43,6 +48,7 @@
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",

@@ -6,7 +6,11 @@ import {
   text,
   timestamp,
   unique,
+  vector,
 } from "drizzle-orm/pg-core";
+
+// voyage-3-lite's output dimensionality — see src/lib/embeddings.ts.
+export const EMBEDDING_DIMENSIONS = 512;
 
 export const sourceEnum = pgEnum("source", [
   "gmail",
@@ -79,6 +83,12 @@ export const purgedContact = pgTable(
 export const person = pgTable("person", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   name: text("name").notNull(),
+  // Derived: the mean of this Person's Events' embeddings (across all their
+  // Contacts), recomputed whenever a new embedded Event is added. Null until
+  // at least one of their Events has an embedding.
+  summaryEmbedding: vector("summary_embedding", {
+    dimensions: EMBEDDING_DIMENSIONS,
+  }),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -143,6 +153,10 @@ export const event = pgTable(
     bodyText: text("body_text").notNull(),
     // Source-native message id (e.g. Gmail message id) — prevents re-import duplicates.
     sourceMessageId: text("source_message_id").notNull(),
+    // Null if embedding generation failed or hasn't run yet — the import
+    // that created this Event still succeeds without it (see
+    // src/lib/embeddings.ts).
+    embedding: vector("embedding", { dimensions: EMBEDDING_DIMENSIONS }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

@@ -5,8 +5,8 @@ Status as of M10 completion. See `REQUIREMENTS.md` for the glossary/scope,
 full M0–M14 plan. This file tracks what's actually been *built*, key
 decisions made along the way, and gotchas worth knowing before continuing.
 
-**Current state**: 106 tests passing (`npm run test`), `tsc --noEmit` clean.
-M0–M10 done. M11 (embeddings) is next.
+**Current state**: 156 tests passing (`npm run test`), `tsc --noEmit` clean.
+M0–M14 done — full MVP scope from `REQUIREMENTS.md` is built.
 
 ## Architecture as actually built (differs from the original plan)
 
@@ -45,6 +45,30 @@ M0–M10 done. M11 (embeddings) is next.
   a small `src/lib/*.ts` module with an injectable `db` parameter, kept
   separate from the Next.js pages/actions that wire it to the real client.
   This pattern was applied consistently from M3 onward and should continue.
+
+- **AI providers**: two separate providers, chosen for different jobs.
+  **Voyage AI** (`voyage-3-lite`, 512-dim) embeds Events/campaign goals for
+  semantic search — chosen over a local on-device model for negligible cost
+  at this scale with no local RAM/disk footprint. **Anthropic's Claude API**
+  (`claude-opus-5`) drafts the actual outreach email text — a
+  generation task, not a semantic-similarity task, so it's a different model
+  family entirely. Both need their own env var (`VOYAGE_API_KEY`,
+  `ANTHROPIC_API_KEY`) and both are optional until the milestone that needs
+  them (M11/M13 respectively) — everything upstream still works without
+  them.
+  - **Gotcha**: `extensions: { vector }` passed to `new PGlite(...)` only
+    makes the pgvector extension *available* — it still needs an explicit
+    `CREATE EXTENSION IF NOT EXISTS vector;` before any `vector` column
+    works. This was silently broken from M0 until M11 was the first thing to
+    actually use a vector column.
+  - **Gotcha**: Voyage's free tier without a payment method on file is a
+    strict 3 requests/minute — genuinely hit during real backfills, not just
+    in theory. `AdaptiveThrottle` (`src/lib/adaptive-throttle.ts`, originally
+    built for Gmail's rate limit) was generalized with a `label` option and
+    reused here rather than writing a second throttler.
+  - **Gotcha**: only Next.js itself auto-loads `.env.local`; standalone
+    `tsx` scripts don't. `src/env.ts` (a `dotenv` loader imported once from
+    `src/db/connection.ts`) fixes this for every CLI script.
 
 ## Milestone-by-milestone summary
 
@@ -134,12 +158,71 @@ email domains as a "likely works at" signal) + `src/lib/person-timeline.ts`
 newest-first feed). `/people/[id]` page shows Contacts, company signal, and
 the merged timeline.
 
+### M11 — Event/Person embeddings
+`src/lib/embeddings.ts` (`generateEmbeddings`, Voyage `voyage-3-lite`,
+batched up to 128 texts/request) + `src/lib/person-embedding.ts`
+(`updatePersonSummaryEmbedding` — a Person's summary embedding is the mean
+of all their Events' embeddings across every merged Contact). Gmail import
+now embeds each batch of new Events inline (best-effort — a failed/missing
+`VOYAGE_API_KEY` doesn't fail the import, Events just keep a null
+embedding). `db:backfill-embeddings` backfills any Events missed earlier
+and `db:verify-embeddings` runs the milestone's actual nearest-neighbor
+verification (two similar-topic Events should rank closer than a
+dissimilar one).
+
+### M12 — Campaign definition + ranked targeting
+`src/lib/campaign-ranking.ts`. Score = weighted sum of cosine similarity
+(0.6, dominant — semantic relevance is the primary signal per
+REQUIREMENTS.md), recency (0.25, true exponential half-life decay, 90-day
+half-life — `computeRecencyScore` had an off-by-`ln(2)` bug caught by its
+own test, not manual review), and engagement (0.15, log-scaled, saturating
+at 20 events so 20 vs. 200 messages score nearly the same). Only People
+with at least one **active** Contact are eligible — `pending` (one-way)
+contacts aren't confirmed relationships yet. `/campaigns` page: free-text
+goal in, ranked People with score breakdown out. `db:rank-campaign` for
+real-data verification.
+
+### M13 — Personalized draft generation
+`src/lib/draft-generation.ts`. `loadPersonDraftContext` pulls a Person's
+full chronological Event history across every merged Contact plus their
+contact metadata; `buildDraftPrompt` (pure, unit-tested) turns that into a
+system/user prompt instructing Claude to reference only given facts, never
+fabricate shared history, and output a strict `Subject: ...` + body format
+(`parseDraftResponse` splits it back apart, falling back to
+whole-response-as-body if the model doesn't follow the format).
+`generateDraftForPerson` is the untested real-API pipeline; the tests prove
+two different People's contexts never leak into each other's prompt.
+`/campaigns/draft` page + `db:generate-draft` script for real-data
+verification.
+
+### M14 — Approval + send
+`src/lib/gmail-send.ts`. `gmail.send` added to `GMAIL_SCOPES`
+(`src/lib/google.ts`) — **any account connected before this milestone must
+reconnect** to grant it, and the scope also has to be added to the Google
+Cloud OAuth consent screen's configured scope list (Data Access → Scopes),
+not just requested in code, or consent silently doesn't grant it.
+`buildRawEmail` (pure RFC 2822 + base64url construction, MIME-encodes
+non-ASCII subjects) and `sendGmailMessage` are unit-tested against a fake
+Gmail client. `approveAndSendDraft` looks up the recipient address
+server-side from the selected `contactId` (never trusts a client-submitted
+address, so it can't drift from the dropdown selection), sends, then
+`recordSentEvent` inserts the sent message as a new outbound Event —
+embedded and folded into the Person's summary embedding exactly like an
+imported message, so it shows up in the timeline and future campaign
+ranking immediately. `/campaigns/draft` is now an editable form (subject +
+body + recipient picker) submitting to `sendDraftAction`, which redirects
+to `/campaigns` with a sent confirmation.
+
 ## Known gaps / deferred
 
 - LinkedIn/SMS ingestion (M3/M4 scope from REQUIREMENTS.md) — not started;
   the generalized ingestion API contract is deferred until then.
 - Hotmail import — not started (Gmail only so far).
-- M11–M14 (embeddings, campaign targeting, draft generation, send) not
-  started.
 - No UI for editing a Person's name directly (only indirectly via
   merge/un-merge, which derive names from Contact display names).
+- No Outreach state-machine tracking (sent/replied/etc. beyond the raw
+  Event record) — out of MVP scope per `MILESTONES.md`.
+- A failed send on `/campaigns/draft` regenerates a fresh AI draft rather
+  than preserving the user's edits — a known v1 rough edge, not a bug.
+- No approval/audit trail beyond the Event itself — there's no record of
+  who clicked "Approve & send" or when, beyond the Event's `createdAt`.

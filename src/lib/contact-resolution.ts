@@ -8,6 +8,7 @@ type ContactStatus = "pending" | "active";
 
 export interface ContactResolutionResult {
   contactId: number;
+  personId: number;
   wasCreated: boolean;
   // True when an existing "pending" (one-way-only) Contact was promoted to
   // "active" by this call — e.g. a reply just arrived to an old message.
@@ -42,9 +43,19 @@ export async function findOrCreateContact(
         .update(contact)
         .set({ status: "active", updatedAt: new Date() })
         .where(eq(contact.id, existing.id));
-      return { contactId: existing.id, wasCreated: false, wasPromoted: true };
+      return {
+        contactId: existing.id,
+        personId: existing.personId,
+        wasCreated: false,
+        wasPromoted: true,
+      };
     }
-    return { contactId: existing.id, wasCreated: false, wasPromoted: false };
+    return {
+      contactId: existing.id,
+      personId: existing.personId,
+      wasCreated: false,
+      wasPromoted: false,
+    };
   }
 
   const [newPerson] = await db
@@ -62,7 +73,12 @@ export async function findOrCreateContact(
     })
     .returning();
 
-  return { contactId: newContact.id, wasCreated: true, wasPromoted: false };
+  return {
+    contactId: newContact.id,
+    personId: newPerson.id,
+    wasCreated: true,
+    wasPromoted: false,
+  };
 }
 
 // Two-way detection for a single import batch can't see across batches: an

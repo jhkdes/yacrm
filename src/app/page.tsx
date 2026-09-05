@@ -22,6 +22,7 @@ export default async function Home({
     import_contacts_excluded_bulk?: string;
     import_contacts_pending?: string;
     import_contacts_promoted?: string;
+    import_events_embedded?: string;
     import_error?: string;
   }>;
 }) {
@@ -130,6 +131,7 @@ export default async function Home({
               <li>
                 Contacts promoted to active this run: {params.import_contacts_promoted}
               </li>
+              <li>Events embedded: {params.import_events_embedded}</li>
             </ul>
           )}
         </>
