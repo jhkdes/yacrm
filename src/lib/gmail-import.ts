@@ -10,6 +10,7 @@ import {
   hasOppositeDirectionHistory,
 } from "@/lib/contact-resolution";
 import { getPurgedIdentifiers } from "@/lib/contact-purge";
+import { generateEmbeddings } from "@/lib/embeddings";
 import { createOAuthClient } from "@/lib/google";
 import {
   CandidateMessage,
@@ -22,6 +23,7 @@ import {
   parseFirstAddress,
   toGmailDateQuery,
 } from "@/lib/gmail-parsing";
+import { updatePersonSummaryEmbedding } from "@/lib/person-embedding";
 
 export interface ImportSummary {
   messagesScanned: number;
@@ -41,6 +43,10 @@ export interface ImportSummary {
   // because this batch itself is two-way, or because a reply just arrived
   // to complete a conversation whose other half was imported previously.
   contactsPromoted: number;
+  // Events that got a real embedding this run. Can be less than
+  // eventsCreated if embedding generation failed (e.g. no/invalid
+  // VOYAGE_API_KEY) — the import still succeeds without them.
+  eventsEmbedded: number;
 }
 
 interface MessagePayload {
@@ -51,7 +57,7 @@ interface MessagePayload {
   occurredAt: Date;
 }
 
-async function loadGmailAccount(db: DrizzleDb, accountId: number) {
+export async function loadGmailAccount(db: DrizzleDb, accountId: number) {
   const account = await db.query.oauthAccount.findFirst({
     where: eq(oauthAccount.id, accountId),
   });
@@ -61,7 +67,7 @@ async function loadGmailAccount(db: DrizzleDb, accountId: number) {
   return account;
 }
 
-async function createGmailClient(db: DrizzleDb, accountId: number) {
+export async function createGmailClient(db: DrizzleDb, accountId: number) {
   const account = await loadGmailAccount(db, accountId);
   const oauthClient = createOAuthClient();
 
@@ -158,7 +164,7 @@ export async function runGmailImport(
   ownEmail: string,
   startDate: string,
 ): Promise<ImportSummary> {
-  const throttle = new AdaptiveThrottle();
+  const throttle = new AdaptiveThrottle({ label: "gmail-import" });
 
   const messageIds: string[] = [];
   let pageToken: string | undefined;
@@ -192,6 +198,7 @@ export async function runGmailImport(
     contactsExcludedBulkSender: 0,
     contactsPending: 0,
     contactsPromoted: 0,
+    eventsEmbedded: 0,
   };
 
   const purgedEmails = await getPurgedIdentifiers(db, "gmail");
@@ -328,9 +335,27 @@ export async function runGmailImport(
         })),
     ];
 
-  const contactIdCache = new Map<string, number>();
+  // Batch-embed everything up front — far cheaper than one API call per
+  // message. Resilient to failure: if embedding generation errors (e.g. no
+  // VOYAGE_API_KEY configured), the import still proceeds with null
+  // embeddings rather than failing outright.
+  let embeddings: (number[] | null)[] = toPersist.map(() => null);
+  try {
+    const generated = await generateEmbeddings(
+      toPersist.map(({ candidate }) => candidate.payload.bodyText),
+    );
+    embeddings = generated;
+  } catch (err) {
+    console.warn(
+      "[gmail-import] embedding generation failed, continuing without embeddings",
+      err,
+    );
+  }
 
-  for (const { candidate, status } of toPersist) {
+  const contactIdCache = new Map<string, number>();
+  const affectedPersonIds = new Set<number>();
+
+  for (const [index, { candidate, status }] of toPersist.entries()) {
     let contactId = contactIdCache.get(candidate.otherPartyEmail);
     if (contactId === undefined) {
       const result = await findOrCreateContact(
@@ -345,8 +370,10 @@ export async function runGmailImport(
       contactId = result.contactId;
       contactIdCache.set(candidate.otherPartyEmail, contactId);
       if (result.wasCreated) summary.contactsCreated += 1;
+      affectedPersonIds.add(result.personId);
     }
 
+    const embedding = embeddings[index] ?? null;
     const inserted = await db
       .insert(event)
       .values({
@@ -356,6 +383,7 @@ export async function runGmailImport(
         subject: candidate.payload.subject,
         bodyText: candidate.payload.bodyText,
         sourceMessageId: candidate.payload.messageId,
+        embedding,
       })
       .onConflictDoNothing({
         target: [event.contactId, event.sourceMessageId],
@@ -364,10 +392,15 @@ export async function runGmailImport(
 
     if (inserted.length > 0) {
       summary.eventsCreated += 1;
+      if (embedding) summary.eventsEmbedded += 1;
     } else {
       summary.eventsSkipped += 1;
       summary.eventsSkippedDuplicate += 1;
     }
+  }
+
+  for (const personId of affectedPersonIds) {
+    await updatePersonSummaryEmbedding(db, personId);
   }
 
   return summary;

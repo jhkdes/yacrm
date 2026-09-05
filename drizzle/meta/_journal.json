@@ -43,6 +43,13 @@
       "when": 1788534004770,
       "tag": "0005_acoustic_jack_power",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788548776105,
+      "tag": "0006_lush_silver_fox",
+      "breakpoints": true
     }
   ]
 }

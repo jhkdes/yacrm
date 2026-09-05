@@ -1,5 +1,5 @@
 import { gmail_v1 } from "googleapis";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { contact, oauthAccount, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
@@ -76,10 +76,30 @@ describe("runGmailImport", () => {
 
   beforeEach(async () => {
     testDb = await createTestDb();
+    // runGmailImport calls the real Voyage embeddings API internally.
+    // Tests must never depend on a real network service, so stub fetch with
+    // a fast, deterministic fake response — this also exercises the
+    // embedding-failure-is-non-fatal path when a test doesn't need it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (_url, options) => {
+        const body = JSON.parse(options.body);
+        return {
+          ok: true,
+          json: async () => ({
+            data: body.input.map((_text: string, index: number) => ({
+              embedding: Array(512).fill(0),
+              index,
+            })),
+          }),
+        };
+      }),
+    );
   });
 
   afterEach(async () => {
     await testDb.client.close();
+    vi.unstubAllGlobals();
   });
 
   it("imports a real two-way conversation as a Contact with both Events", async () => {

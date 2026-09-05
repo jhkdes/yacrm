@@ -5,6 +5,9 @@ export interface AdaptiveThrottleOptions {
   maxDelayMs?: number;
   maxBackoffMs?: number;
   maxRetries?: number;
+  // Prefix for the rate-limit warning log — this class is shared across
+  // multiple rate-limited APIs (Gmail, Voyage), so the log should say which.
+  label?: string;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -22,12 +25,14 @@ export class AdaptiveThrottle {
   private readonly maxDelayMs: number;
   private readonly maxBackoffMs: number;
   private readonly maxRetries: number;
+  private readonly label: string;
 
   constructor(options: AdaptiveThrottleOptions = {}) {
     this.delayMs = options.initialDelayMs ?? 100;
     this.maxDelayMs = options.maxDelayMs ?? 5000;
     this.maxBackoffMs = options.maxBackoffMs ?? 60_000;
     this.maxRetries = options.maxRetries ?? 8;
+    this.label = options.label ?? "adaptive-throttle";
   }
 
   get currentDelayMs(): number {
@@ -47,7 +52,7 @@ export class AdaptiveThrottle {
         this.delayMs = Math.min(this.delayMs * 2, this.maxDelayMs);
         const backoff = Math.min(1000 * 2 ** attempt, this.maxBackoffMs);
         console.warn(
-          `[gmail-import] rate limited, backing off ${backoff}ms and slowing future requests to ${this.delayMs}ms apart (attempt ${attempt + 1}/${this.maxRetries})`,
+          `[${this.label}] rate limited, backing off ${backoff}ms and slowing future requests to ${this.delayMs}ms apart (attempt ${attempt + 1}/${this.maxRetries})`,
         );
         await sleep(backoff);
       }

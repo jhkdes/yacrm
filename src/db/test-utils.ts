@@ -11,6 +11,10 @@ import * as schema from "./schema";
 // (unique constraints, onConflictDoNothing) rather than a mocked ORM.
 export async function createTestDb() {
   const client = new PGlite({ extensions: { vector } });
+  // `extensions: { vector }` only makes the extension available — it still
+  // needs to be explicitly created before any `vector` column/type works
+  // (and the migrations below add vector columns).
+  await client.exec("CREATE EXTENSION IF NOT EXISTS vector;");
   const db = drizzle(client, { schema });
 
   await migrate(db, {

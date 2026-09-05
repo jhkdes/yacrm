@@ -15,6 +15,9 @@ async function main() {
 
   const dataDir = path.join(PGLITE_DIR, "data");
   const db = new PGlite(dataDir, { extensions: { vector } });
+  // `extensions: { vector }` only makes the extension available — it still
+  // needs to be explicitly created before any `vector` column/type works.
+  await db.exec("CREATE EXTENSION IF NOT EXISTS vector;");
 
   const server = new PGLiteSocketServer({
     db,

@@ -17,7 +17,8 @@ export default async function PeoplePage({
     <main style={{ padding: "2rem", fontFamily: "sans-serif" }}>
       <h1>People</h1>
       <p>
-        <a href="/contacts">Contacts</a> · <a href="/merges">Merge suggestions</a>
+        <a href="/contacts">Contacts</a> · <a href="/merges">Merge suggestions</a> ·{" "}
+        <a href="/campaigns">Campaign targeting</a>
       </p>
 
       {params.unmerged && (
