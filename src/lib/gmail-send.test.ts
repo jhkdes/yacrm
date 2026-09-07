@@ -40,6 +40,61 @@ describe("buildRawEmail", () => {
     expect(body).toBe("Hi Ada,\n\nGreat catching up.");
   });
 
+  it("stays plain-text when no tracking is requested", () => {
+    const raw = buildRawEmail({
+      from: "me@example.com",
+      to: "ada@example.com",
+      subject: "Hi",
+      body: "Hello",
+    });
+    const { headers } = decode(raw);
+    expect(headers["Content-Type"]).toBe("text/plain; charset=utf-8");
+  });
+
+  it("builds a multipart/alternative message with a clickable link and a tracking pixel", () => {
+    const raw = buildRawEmail({
+      from: "me@example.com",
+      to: "ada@example.com",
+      subject: "Try it out",
+      body: "Hi Ada,\n\nGive this a try.",
+      trackedLinkUrl: "https://redirect.example.com/tok123",
+      trackingPixelUrl: "https://redirect.example.com/pixel/tok123",
+    });
+
+    const { headers, body } = decode(raw);
+    expect(headers["Content-Type"]).toMatch(/^multipart\/alternative; boundary="/);
+
+    // Plain-text part: original body plus the bare (auto-linkifying) URL.
+    expect(body).toContain("Hi Ada,\n\nGive this a try.");
+    expect(body).toContain("https://redirect.example.com/tok123");
+
+    // HTML part: escaped body, a real anchor, and a hidden 1x1 pixel.
+    expect(body).toContain("Hi Ada,<br>\n<br>\nGive this a try.");
+    expect(body).toContain(
+      '<a href="https://redirect.example.com/tok123">https://redirect.example.com/tok123</a>',
+    );
+    expect(body).toContain(
+      '<img src="https://redirect.example.com/pixel/tok123" width="1" height="1" alt="" style="display:none">',
+    );
+  });
+
+  it("escapes HTML-significant characters in the body's HTML part", () => {
+    const raw = buildRawEmail({
+      from: "me@example.com",
+      to: "ada@example.com",
+      subject: "Hi",
+      body: "A <script> & more",
+      trackingPixelUrl: "https://redirect.example.com/pixel/tok123",
+    });
+    const { body } = decode(raw);
+    // The plain-text part legitimately keeps "<script>" un-escaped (plain
+    // text needs no HTML escaping) — only the HTML part (after the second
+    // boundary marker) must never contain it.
+    const htmlPart = body.split("Content-Type: text/html")[1];
+    expect(htmlPart).toContain("A &lt;script&gt; &amp; more");
+    expect(htmlPart).not.toContain("<script>");
+  });
+
   it("MIME-encodes a non-ASCII subject rather than corrupting it", () => {
     const raw = buildRawEmail({
       from: "me@example.com",

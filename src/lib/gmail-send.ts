@@ -53,20 +53,71 @@ export interface RawEmailParams {
   to: string;
   subject: string;
   body: string;
+  // M19: when set, sends multipart/alternative (plain text + HTML) instead
+  // of plain-text-only, so the HTML part can carry a clickable tracked
+  // link and an open-tracking pixel — a plain-text email has no way to
+  // render either. trackedLinkUrl alone would technically work in plain
+  // text too (email clients auto-linkify a bare URL), but since
+  // trackingPixelUrl always requires HTML anyway, both go through the same
+  // multipart path for one consistent code path rather than two.
+  trackedLinkUrl?: string;
+  trackingPixelUrl?: string;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function textToHtml(text: string): string {
+  return escapeHtml(text).split("\n").join("<br>\n");
 }
 
 // Pure RFC 2822 message construction, base64url-encoded the way Gmail's
 // messages.send API requires — kept separate from the actual API call so
 // it's unit testable without a real network request.
 export function buildRawEmail(params: RawEmailParams): string {
-  const lines = [
-    `From: ${params.from}`,
-    `To: ${params.to}`,
-    `Subject: ${encodeHeaderIfNeeded(params.subject)}`,
+  const { from, to, subject, body, trackedLinkUrl, trackingPixelUrl } = params;
+  const headers = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${encodeHeaderIfNeeded(subject)}`,
     "MIME-Version: 1.0",
+  ];
+
+  if (!trackedLinkUrl && !trackingPixelUrl) {
+    const lines = [...headers, "Content-Type: text/plain; charset=utf-8", "", body];
+    return Buffer.from(lines.join("\r\n"), "utf-8").toString("base64url");
+  }
+
+  const plainTextBody = trackedLinkUrl ? `${body}\n\n${trackedLinkUrl}` : body;
+  const htmlBody = [
+    textToHtml(body),
+    trackedLinkUrl
+      ? `<p><a href="${trackedLinkUrl}">${trackedLinkUrl}</a></p>`
+      : "",
+    trackingPixelUrl
+      ? `<img src="${trackingPixelUrl}" width="1" height="1" alt="" style="display:none">`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const boundary = `yacrm_${crypto.randomUUID()}`;
+  const lines = [
+    ...headers,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
     "Content-Type: text/plain; charset=utf-8",
     "",
-    params.body,
+    plainTextBody,
+    "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    htmlBody,
+    "",
+    `--${boundary}--`,
   ];
   return Buffer.from(lines.join("\r\n"), "utf-8").toString("base64url");
 }

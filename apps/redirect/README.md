@@ -11,11 +11,19 @@ LinkedIn recipients.
 with no `destination_url`, redirects to this app's own `/` instead of
 erroring.
 
+`GET /pixel/<token>` is the open-tracking counterpart (M19) — a real sent
+email's `<img>` tag points here. Always returns a real 1x1 transparent GIF
+regardless of whether the token was recognized (a broken-image icon in the
+recipient's inbox is a worse signal to leak than silently doing nothing),
+and advances the recipient's status `sent` → `opened` if appropriate.
+
 It shares the main app's database — see [`../../src/db/schema.ts`](../../src/db/schema.ts)
-for the real schema; the query logic here (`src/click-tracking.ts`) is a
-deliberately small, hand-duplicated raw-SQL copy of
-[`../../src/lib/click-tracking.ts`](../../src/lib/click-tracking.ts), not a
-shared package — see the comment at the top of that file for why.
+for the real schema; the query logic here (`src/click-tracking.ts`,
+`src/open-tracking.ts`) is deliberately small, hand-duplicated raw-SQL
+copies of [`../../src/lib/click-tracking.ts`](../../src/lib/click-tracking.ts)
+and [`../../src/lib/open-tracking.ts`](../../src/lib/open-tracking.ts), not
+a shared package — see the comment at the top of `click-tracking.ts` for
+why.
 
 ## Local development
 

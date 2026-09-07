@@ -4,6 +4,7 @@ import {
   deleteCampaignAction,
   removeCampaignRecipientAction,
   restoreCampaignRecipientAction,
+  sendCampaignRecipientAction,
 } from "@/app/actions";
 import { db } from "@/db/client";
 
@@ -35,6 +36,7 @@ export default async function CampaignDetailPage({
     undo_recipient_id?: string;
     restored?: string;
     campaign_restored?: string;
+    sent_recipient?: string;
     error?: string;
   }>;
 }) {
@@ -144,6 +146,9 @@ export default async function CampaignDetailPage({
       {query.campaign_restored && (
         <p style={{ color: "green" }}>Campaign restored.</p>
       )}
+      {query.sent_recipient && (
+        <p style={{ color: "green" }}>Sent.</p>
+      )}
 
       <h2>Funnel</h2>
       <ul>
@@ -187,6 +192,13 @@ export default async function CampaignDetailPage({
                     {buildTrackedLink(r.trackingToken)}
                   </a>
                 </p>
+              )}
+              {r.channel === "email" && r.status === "drafted" && (
+                <form action={sendCampaignRecipientAction}>
+                  <input type="hidden" name="campaignId" value={campaign.id} />
+                  <input type="hidden" name="recipientId" value={r.id} />
+                  <button type="submit">Send</button>
+                </form>
               )}
               <form action={removeCampaignRecipientAction}>
                 <input type="hidden" name="campaignId" value={campaign.id} />
