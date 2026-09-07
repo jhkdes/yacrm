@@ -29,6 +29,7 @@
     "db:rank-campaign": "tsx scripts/rank-campaign.ts",
     "db:backfill-embeddings": "tsx scripts/backfill-embeddings.ts",
     "db:generate-draft": "tsx scripts/generate-draft.ts",
+    "db:copy-to-remote": "tsx scripts/migrate-to-supabase.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
