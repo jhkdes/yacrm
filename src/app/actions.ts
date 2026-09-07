@@ -1,7 +1,12 @@
 "use server";
 
+import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 
+import {
+  ACCESS_GATE_COOKIE_NAME,
+  computeAccessToken,
+} from "@/lib/access-gate";
 import { db } from "@/db/client";
 import { purgeContact, unpurgeIdentifier } from "@/lib/contact-purge";
 import { ImportSummary, importGmailHistory, syncGmailHistory } from "@/lib/gmail-import";
@@ -28,6 +33,45 @@ import {
   undismissMergeSuggestion,
 } from "@/lib/merge-dismissals";
 import { mergePersons, unmergePerson } from "@/lib/person-merge";
+
+const ONE_MONTH_SECONDS = 60 * 60 * 24 * 30;
+
+export async function loginAction(formData: FormData) {
+  const password = formData.get("password");
+  const next = formData.get("next");
+  const nextPath =
+    typeof next === "string" && next.startsWith("/") ? next : "/";
+  const expected = process.env.APP_PASSWORD;
+
+  if (
+    typeof password !== "string" ||
+    !password ||
+    !expected ||
+    password !== expected
+  ) {
+    redirect(
+      `/login?${new URLSearchParams({ error: "invalid_password", next: nextPath }).toString()}`,
+    );
+  }
+
+  const token = await computeAccessToken(expected);
+  const cookieStore = await cookies();
+  cookieStore.set(ACCESS_GATE_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: true,
+    sameSite: "lax",
+    maxAge: ONE_MONTH_SECONDS,
+    path: "/",
+  });
+
+  redirect(nextPath);
+}
+
+export async function logoutAction() {
+  const cookieStore = await cookies();
+  cookieStore.delete(ACCESS_GATE_COOKIE_NAME);
+  redirect("/login");
+}
 
 function summaryToSearchParams(summary: ImportSummary): URLSearchParams {
   return new URLSearchParams({

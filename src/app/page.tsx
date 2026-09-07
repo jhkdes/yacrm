@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 
-import { importGmailAction, syncGmailAction } from "@/app/actions";
+import { importGmailAction, logoutAction, syncGmailAction } from "@/app/actions";
 import { db } from "@/db/client";
 import { oauthAccount } from "@/db/schema";
 
@@ -46,6 +46,9 @@ export default async function Home({
       <p>
         <a href="/import/linkedin">Import LinkedIn connections</a>
       </p>
+      <form action={logoutAction}>
+        <button type="submit">Sign out</button>
+      </form>
 
       {params.gmail_connected && (
         <p style={{ color: "green" }}>
