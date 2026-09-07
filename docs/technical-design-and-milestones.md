@@ -23,8 +23,8 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M15 | LinkedIn connections import | ✅ Done | 1 | — | Contacts appear, merge suggestions fire against existing Gmail contacts |
 | M16 | LinkedIn messages import | ✅ Done | 1 | M15 | Message history appears on a person's timeline with embeddings |
 | M17 | Campaign & recipient schema, incl. campaign/recipient management + undo | ✅ Done | 2 | — | A campaign persists; ranking/drafting write real rows instead of vanishing on refresh; adding/removing people and deleting a campaign are all reversible immediately after the action |
-| M18 | Tracked link + click capture | 2 | M17 | Hitting a recipient's tracked link redirects and flips their status to `clicked` |
-| M19 | Email send wired to tracking | 2 | M17, M18 | Sending a real email marks `sent`, and an open registers via the pixel |
+| M18 | Tracked link + click capture | ✅ Done | 2 | M17 | Hitting a recipient's tracked link redirects and flips their status to `clicked` |
+| M19 | Email send wired to tracking | ✅ Done | 2 | M17, M18 | Sending a real email marks `sent`, and an open registers via the pixel |
 | M20 | Completion webhook | 2 | M17 | A synthetic completion POST flips a recipient to `completed` |
 | M21 | LinkedIn copy-assist queue | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
 | M22 | Campaign dashboard + CSV export | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
@@ -159,27 +159,32 @@ export const campaignRecipient = pgTable(
 - Integration (pglite): `createCampaign` + `addRecipients` persistence; channel-based Contact selection (skips `pending` contacts and people with no Contact on the requested channel); idempotent re-add; the campaign's own goal (not a caller-supplied one) drives drafting; soft-delete/restore round-trips for both recipient and campaign, including the revive-on-conflict path and the cascade-preserves-recipients behavior.
 - Manual: `npm run db:list-campaigns` (new script) to inspect campaign/recipient state from the CLI without opening the browser; full walkthrough at `/campaigns` — create, add-to-existing, remove-with-undo, delete-with-undo.
 
-### M18 — Tracked link + click capture
+### M18 — Tracked link + click capture ✅
 
-**New route handler** `src/app/api/r/[token]/route.ts`:
-- `GET`: look up `campaign_recipient` by `trackingToken`. If found and `status` is `"sent"` or `"opened"`, set `status: "clicked"`, `clickedAt: now`. Redirect (302) to the real AI-interview URL (with the recipient's identity passed through however that tool expects, e.g. as a query param). If the token is unknown, redirect to a generic fallback rather than erroring — a stale/tampered link shouldn't dead-end the recipient.
+**Deviates from the original plan**: the tracked-link endpoint doesn't live only in this app. It was built twice, deliberately: `src/lib/click-tracking.ts` + `src/app/api/r/[token]/route.ts` here (Drizzle-based, kept as a local-testing fallback), and a hand-duplicated raw-SQL copy in `apps/redirect/src/click-tracking.ts` + `apps/redirect/src/app/[token]/route.ts` — a separate, minimal, independently-deployed Next.js app that's the one a real recipient's click actually reaches. This split happened because getting a real end-to-end test working surfaced that this app couldn't be both privately-run (for you) and publicly reachable (for recipients) at the same time on Vercel's free tier without real work — see `docs/outreach-roadmap.md` and the security note under M19 below for the fuller story. It also forced migrating the database itself off local-only PGlite onto Supabase, since a deployed app can't reach `127.0.0.1`.
 
-**Test plan**:
-- Integration (pglite + route handler test): seed a `campaign_recipient` with `status: "sent"`, `GET` the route with its token, assert a 302 and that `status` is now `"clicked"`.
-- Integration: an unknown token still redirects (to the fallback), doesn't 500.
-- Manual: click a real generated link end to end once the interview tool's real URL is known.
+**Shipped as**:
+- `shouldRecordClick(status)` — **pure**: a click only ever advances `drafted`/`sent`/`opened` → `clicked`; never re-triggers on an already-`clicked` link (idempotent, doesn't reset `clickedAt`); never downgrades `completed`.
+- `recordClick(db, token)` — **DB-only**: looks up the recipient joined with its campaign for `destinationUrl`; an unknown token or a campaign with no `destinationUrl` returns a fallback path (`/`) rather than erroring.
+- The route handler is a thin wrapper redirecting to whatever `recordClick` resolves.
 
-### M19 — Email send wired to tracking
+**Test plan** (as built): `click-tracking.test.ts` — pure `shouldRecordClick` cases, plus pglite-backed `recordClick` integration tests (unknown token, normal advance, idempotent re-click, completed-never-downgraded, no-destinationUrl fallback). Manually verified end to end twice: once locally against local PGlite, once for real against the deployed `apps/redirect` reading live Supabase data (seeded a real row, hit the live URL, confirmed the DB update).
 
-**Changes to `src/lib/gmail-send.ts`**:
-- `buildRawEmail` gets an optional `trackingPixelUrl` param appended as an `<img>` tag in the HTML body — **pure**, extend the existing unit test.
-- New: `src/app/api/pixel/[token]/route.ts` — `GET` returns a 1x1 transparent GIF; as a side effect, if the recipient's `status` is `"sent"`, sets `status: "opened"`, `openedAt: now`.
-- `approveAndSendDraft` (or a new `sendCampaignRecipient(db, recipientId)` wrapping it) rewrites the draft body to inline the M18 tracking link and the M19 pixel before sending, then sets `campaign_recipient.status: "sent"`, `sentAt: now`.
+### M19 — Email send wired to tracking ✅
 
-**Test plan**:
-- Unit: `buildRawEmail` includes the pixel `<img>` tag when a URL is passed.
-- Integration (pglite): the pixel route flips `sent → opened` but does *not* downgrade an already-`clicked` recipient (order of arrival between pixel and click shouldn't matter — `opened` should only apply the `sent → opened` transition, never overwrite `clicked`/`completed`).
-- Manual: send a real campaign email to yourself, confirm the open registers on load and the link click registers on click (`scripts/send-test-campaign-email.ts`).
+**Shipped as**:
+- `buildRawEmail` (`src/lib/gmail-send.ts`) gains optional `trackedLinkUrl`/`trackingPixelUrl` params. With neither set, behavior is byte-for-byte unchanged (plain-text single-part email) — existing tests keep passing untouched. With either set, it builds a `multipart/alternative` message: a plain-text part (original body + the bare tracked-link URL appended, since most clients auto-linkify a bare URL) and an HTML part (HTML-escaped body with `\n` → `<br>`, a real `<a href>` for the link, and the `<img>` pixel). Both are always sent together rather than conditionally choosing plain-vs-HTML — simpler than two code paths, and every "interview_link" send wants both signals anyway.
+- `src/lib/open-tracking.ts` — `recordOpen(db, token)`, mirroring `click-tracking.ts`'s shape: only advances `"sent"` → `"opened"`; a nonexistent token, an already-`opened`/`clicked`/`completed` recipient, or (deliberately) a `"drafted"` one (never sent — a hit there would be spoofed, not a real open) are all no-ops.
+- `src/lib/campaign-send.ts` — `sendCampaignRecipientEmail(db, accountId, recipientId)`, the actual orchestration: loads the recipient (must be `channel: "email"` and `status: "drafted"`, or throws `CampaignRecipientNotSendableError`), builds the tracked-link/pixel URLs from `REDIRECT_BASE_URL` (throws loudly if unset — a relative fallback is meaningless inside a real sent email, unlike the campaign-detail-page *display* case), sends via the existing `sendGmailMessage`, records the usual outbound `event` via `recordSentEvent` so it joins the Person's timeline like any other sent email, then sets `status: "sent"`, `sentAt: now`.
+- Both `src/app/api/pixel/[token]/route.ts` (this app, local-testing fallback) and `apps/redirect/src/app/pixel/[token]/route.ts` (the real public path, same raw-SQL-duplication pattern as M18's click route) exist, for the same reason M18 needed both.
+- UI: a "Send" button appears next to any `channel: "email"`, `status: "drafted"` recipient on `/campaigns/[id]`, calling `sendCampaignRecipientAction`.
+
+**Test plan** (as built):
+- Unit: extended `gmail-send.test.ts` for the multipart/link/pixel/escaping behavior.
+- Integration (pglite): `open-tracking.test.ts` mirrors `click-tracking.test.ts`'s cases. `campaign-send.test.ts` mocks only the actual network call (`sendGmailMessage`) and `createGmailClient`, leaving `buildRawEmail`/`recordSentEvent` real — so it verifies the real tracked-link/pixel URLs get built and passed through, the real `event` row gets created, and the guard errors (not-found, wrong channel, already-sent, missing `REDIRECT_BASE_URL`) all fire correctly, without ever hitting Gmail's actual API.
+- Manual: verified the pixel path the same way as M18's click path — real row seeded in Supabase, real HTTP hit against the deployed `apps/redirect` pixel route, confirmed the status flip.
+
+**Related incident, surfaced by actually deploying for this milestone's testing**: reconsidering "should the main app also deploy" (to make manual testing easier) led to briefly deploying it publicly with no authentication at all — Vercel Authentication's free Hobby tier explicitly excludes a project's production custom domain from protection, only preview/deployment URLs, which isn't obvious until you check. The gap was live for a period with real Gmail access exposed. Fixed with an app-level password gate (`src/proxy.ts`, `src/lib/access-gate.ts`, `/login`) that doesn't depend on Vercel's own protection at all. Documented here because it's the direct reason `REDIRECT_BASE_URL` — not the main app's own domain — is the only correct place for a real send's tracked link/pixel to point.
 
 ### M20 — Completion webhook
 

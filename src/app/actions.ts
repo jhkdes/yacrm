@@ -28,6 +28,7 @@ import {
   restoreCampaign,
   restoreRecipient,
 } from "@/lib/campaigns";
+import { sendCampaignRecipientEmail } from "@/lib/campaign-send";
 import {
   dismissMergeSuggestion,
   undismissMergeSuggestion,
@@ -582,6 +583,33 @@ export async function restoreCampaignRecipientAction(formData: FormData) {
     }`;
   } catch (err) {
     console.error("Restoring campaign recipient failed", err);
+    redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function sendCampaignRecipientAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  const recipientId = Number(formData.get("recipientId"));
+
+  if (!Number.isInteger(campaignId) || !Number.isInteger(recipientId)) {
+    redirect(`/campaigns/${campaignId}?error=invalid_send_request`);
+  }
+
+  const account = await findGmailAccount();
+  if (!account) {
+    redirect(`/campaigns/${campaignId}?error=no_gmail_account`);
+  }
+
+  let redirectTarget: string;
+  try {
+    await sendCampaignRecipientEmail(db, account.id, recipientId);
+    redirectTarget = `/campaigns/${campaignId}?sent_recipient=1`;
+  } catch (err) {
+    console.error("Campaign recipient send failed", err);
     redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
