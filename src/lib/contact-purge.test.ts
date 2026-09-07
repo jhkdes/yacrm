@@ -25,7 +25,7 @@ describe("purgeContact", () => {
   it("deletes the Contact, its Events, and the now-empty Person", async () => {
     const { contactId } = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada Lovelace",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     await testDb.db.insert(event).values({
       contactId,
@@ -47,7 +47,7 @@ describe("purgeContact", () => {
     const { contactId: gmailContactId } = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Ada", email: "ada@example.com" },
+      { name: "Ada", identifier: "ada@example.com" },
     );
     const gmailContact = await testDb.db.query.contact.findFirst({
       where: (c, { eq }) => eq(c.id, gmailContactId),
@@ -76,7 +76,7 @@ describe("purgeContact", () => {
   it("records the identifier as purged so it can be checked by future imports", async () => {
     const { contactId } = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
 
     await purgeContact(testDb.db, contactId);
@@ -94,7 +94,7 @@ describe("purgeContact", () => {
   it("is idempotent to purge the same identifier twice via different re-created contacts", async () => {
     const first = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     await purgeContact(testDb.db, first.contactId);
 
@@ -102,7 +102,7 @@ describe("purgeContact", () => {
     // insert bypassing the import's purged-check) should still purge cleanly.
     const second = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     await expect(
       purgeContact(testDb.db, second.contactId),
@@ -127,7 +127,7 @@ describe("unpurgeIdentifier", () => {
   it("removes the identifier from the purged set", async () => {
     const { contactId } = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     await purgeContact(testDb.db, contactId);
     expect(
@@ -144,13 +144,13 @@ describe("unpurgeIdentifier", () => {
   it("only un-purges the matching source, leaving other sources' purges intact", async () => {
     const { contactId } = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     await purgeContact(testDb.db, contactId);
     const { contactId: linkedinContactId } = await findOrCreateContact(
       testDb.db,
       "linkedin",
-      { name: "Ada", email: "ada@example.com" },
+      { name: "Ada", identifier: "ada@example.com" },
     );
     await purgeContact(testDb.db, linkedinContactId);
 

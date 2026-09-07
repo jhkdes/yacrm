@@ -21,7 +21,7 @@ describe("findOrCreateContact", () => {
   it("creates a new solo Person + Contact when the address is unseen", async () => {
     const result = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada Lovelace",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
 
     expect(result.wasCreated).toBe(true);
@@ -37,11 +37,11 @@ describe("findOrCreateContact", () => {
   it("returns the existing Contact on a second call with the same address", async () => {
     const first = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada Lovelace",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     const second = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada Lovelace (updated display name)",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
 
     expect(second.wasCreated).toBe(false);
@@ -56,11 +56,11 @@ describe("findOrCreateContact", () => {
   it("treats the same email under different sources as different Contacts", async () => {
     const gmailContact = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     const linkedinContact = await findOrCreateContact(testDb.db, "linkedin", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
 
     expect(linkedinContact.contactId).not.toBe(gmailContact.contactId);
@@ -69,7 +69,7 @@ describe("findOrCreateContact", () => {
   it("defaults to active status when no status is passed", async () => {
     const { contactId } = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
     const contactRow = await testDb.db.query.contact.findFirst({
       where: (c, { eq }) => eq(c.id, contactId),
@@ -81,7 +81,7 @@ describe("findOrCreateContact", () => {
     const { contactId } = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Ada", email: "ada@example.com" },
+      { name: "Ada", identifier: "ada@example.com" },
       "pending",
     );
     const contactRow = await testDb.db.query.contact.findFirst({
@@ -94,7 +94,7 @@ describe("findOrCreateContact", () => {
     const first = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Ada", email: "ada@example.com" },
+      { name: "Ada", identifier: "ada@example.com" },
       "pending",
     );
     expect(first.wasPromoted).toBe(false);
@@ -102,7 +102,7 @@ describe("findOrCreateContact", () => {
     const second = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Ada", email: "ada@example.com" },
+      { name: "Ada", identifier: "ada@example.com" },
       "active",
     );
 
@@ -119,13 +119,13 @@ describe("findOrCreateContact", () => {
   it("never downgrades an active Contact back to pending", async () => {
     const first = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
 
     const second = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Ada", email: "ada@example.com" },
+      { name: "Ada", identifier: "ada@example.com" },
       "pending",
     );
 
@@ -151,7 +151,7 @@ describe("event uniqueness constraint", () => {
   it("silently skips inserting a duplicate (contactId, sourceMessageId) Event", async () => {
     const { contactId } = await findOrCreateContact(testDb.db, "gmail", {
       name: "Ada",
-      email: "ada@example.com",
+      identifier: "ada@example.com",
     });
 
     const eventValues = {
@@ -208,7 +208,7 @@ describe("hasOppositeDirectionHistory", () => {
     const { contactId } = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Nadia", email: "nadia@example.com" },
+      { name: "Nadia", identifier: "nadia@example.com" },
       "pending",
     );
     await testDb.db.insert(event).values({
@@ -234,7 +234,7 @@ describe("hasOppositeDirectionHistory", () => {
     const { contactId } = await findOrCreateContact(
       testDb.db,
       "gmail",
-      { name: "Nadia", email: "nadia@example.com" },
+      { name: "Nadia", identifier: "nadia@example.com" },
       "pending",
     );
     await testDb.db.insert(event).values({

@@ -50,6 +50,34 @@
       "when": 1788548776105,
       "tag": "0006_lush_silver_fox",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788789342598,
+      "tag": "0007_sparkling_wild_child",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788791530310,
+      "tag": "0008_strong_franklin_richards",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788792034694,
+      "tag": "0009_milky_gwen_stacy",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788794178850,
+      "tag": "0010_glossy_pepper_potts",
+      "breakpoints": true
     }
   ]
 }

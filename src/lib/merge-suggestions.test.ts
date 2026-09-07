@@ -316,4 +316,66 @@ describe("generateMergeSuggestions", () => {
 
     expect(generateMergeSuggestions(contacts)).toHaveLength(0);
   });
+
+  it("finds a real match embedded in a large batch of otherwise-unrelated Contacts, without an O(n²) blowup", () => {
+    // Every generated Contact gets a unique alphabetic name/local-part, so
+    // it shares no index bucket with any other generated Contact — only the
+    // two deliberately-planted "Jane Doe" Contacts should ever land in the
+    // same bucket. (Deliberately alphabetic, not numeric-suffixed: the
+    // tokenizer splits on non-letters, so "Name123" and "Name456" would
+    // both collapse to the token "name" and defeat the point of this test.)
+    // This is exactly the shape (thousands of Contacts, one real duplicate)
+    // that made the old O(n²) all-pairs scan slow once the merges page's
+    // Contact count reached the low thousands.
+    function uniqueWord(n: number): string {
+      let s = "";
+      let x = n + 1;
+      while (x > 0) {
+        const rem = (x - 1) % 26;
+        s = String.fromCharCode(97 + rem) + s;
+        x = Math.floor((x - 1) / 26);
+      }
+      return s;
+    }
+
+    const contacts: ContactForMatching[] = [];
+    for (let i = 0; i < 4000; i += 1) {
+      const word = uniqueWord(i);
+      contacts.push(
+        contact({
+          contactId: i,
+          personId: i,
+          sourceIdentifier: `person${word}@unique-domain-${word}.example`,
+          displayName: `Firstname${word} Lastname${word}`,
+        }),
+      );
+    }
+    contacts.push(
+      contact({
+        contactId: 9001,
+        personId: 9001,
+        sourceIdentifier: "jane.doe@personalmail.com",
+        displayName: "Jane Doe",
+      }),
+    );
+    contacts.push(
+      contact({
+        contactId: 9002,
+        personId: 9002,
+        sourceIdentifier: "jane.doe@company.com",
+        displayName: "Jane Doe",
+      }),
+    );
+
+    const startedAt = performance.now();
+    const suggestions = generateMergeSuggestions(contacts);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toMatchObject({ personAId: 9001, personBId: 9002 });
+    // Generous ceiling — the point isn't a tight perf budget, it's proving
+    // this scales roughly linearly rather than quadratically. The old
+    // implementation took multiple seconds at this Contact count.
+    expect(elapsedMs).toBeLessThan(1000);
+  });
 });

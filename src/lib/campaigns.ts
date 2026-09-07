@@ -1,0 +1,223 @@
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
+
+import { campaign, campaignRecipient, contact } from "@/db/schema";
+import type { DrizzleDb } from "@/db/types";
+import type { CampaignRankingEntry } from "@/lib/campaign-ranking";
+import { generateDraftForPerson } from "@/lib/draft-generation";
+
+export type CampaignChannel = "email" | "linkedin";
+export type CampaignType = "interview_link" | "intro";
+
+// Which Contact source a channel sends through — the only two sends M17+
+// support (see docs/outreach-roadmap.md's funnel table).
+const CHANNEL_TO_SOURCE: Record<CampaignChannel, "gmail" | "linkedin"> = {
+  email: "gmail",
+  linkedin: "linkedin",
+};
+
+export class CampaignNotFoundError extends Error {
+  constructor(campaignId: number) {
+    super(`No Campaign found with id ${campaignId}.`);
+  }
+}
+
+// Persists a Campaign row. Before this, "campaign" meant only an ephemeral
+// ranking pass (src/app/campaigns/page.tsx built a results list from
+// rankPeopleForCampaign and threw it away on the next request) — this is
+// what M17 fixes: a campaign and its recipients now survive a refresh.
+//
+// destinationUrl is where a recipient's tracked link (M18) sends them —
+// required for an "interview_link" campaign, null for "intro" (which has
+// no tracked link at all). Not validated here; the caller (createCampaignAction)
+// validates it's a well-formed URL before this is ever reached.
+export async function createCampaign(
+  db: DrizzleDb,
+  name: string,
+  goal: string,
+  destinationUrl: string | null,
+  type: CampaignType = "interview_link",
+): Promise<{ campaignId: number }> {
+  const [row] = await db
+    .insert(campaign)
+    .values({ name, goal, destinationUrl, type })
+    .returning({ id: campaign.id });
+  return { campaignId: row.id };
+}
+
+export interface AddRecipientsResult {
+  added: number;
+  // No active Contact on the requested channel for this Person — e.g. a
+  // ranked Person with only a LinkedIn contact when targeting by email.
+  skippedNoContactForChannel: number;
+  skippedDraftFailed: number;
+  skippedAlreadyRecipient: number;
+}
+
+// Adds a batch of ranked People to a Campaign as recipients: for each one,
+// finds their Contact on the requested channel, generates a personalized
+// draft against the Campaign's own persisted goal (not a separately-passed
+// goal — keeps every recipient's draft grounded in the same goal the
+// Campaign was created with, even if this is called across multiple
+// requests), and stores it with a fresh tracking token in "drafted" status.
+// A Person already an active recipient of this Campaign is left untouched
+// rather than erroring, so re-submitting the same targeting page is
+// harmless. A Person who was previously removed (soft-deleted) is revived
+// with a fresh draft/token instead of colliding with their dead row — see
+// the ON CONFLICT ... WHERE clause below.
+export async function addRecipients(
+  db: DrizzleDb,
+  campaignId: number,
+  people: Pick<CampaignRankingEntry, "personId">[],
+  channel: CampaignChannel,
+): Promise<AddRecipientsResult> {
+  const [campaignRow] = await db
+    .select({ goal: campaign.goal })
+    .from(campaign)
+    .where(and(eq(campaign.id, campaignId), isNull(campaign.deletedAt)));
+  if (!campaignRow) throw new CampaignNotFoundError(campaignId);
+
+  const result: AddRecipientsResult = {
+    added: 0,
+    skippedNoContactForChannel: 0,
+    skippedDraftFailed: 0,
+    skippedAlreadyRecipient: 0,
+  };
+  const source = CHANNEL_TO_SOURCE[channel];
+
+  for (const p of people) {
+    const [targetContact] = await db
+      .select({ id: contact.id })
+      .from(contact)
+      .where(
+        and(
+          eq(contact.personId, p.personId),
+          eq(contact.source, source),
+          eq(contact.status, "active"),
+        ),
+      );
+    if (!targetContact) {
+      result.skippedNoContactForChannel += 1;
+      continue;
+    }
+
+    let draft;
+    try {
+      draft = await generateDraftForPerson(db, p.personId, campaignRow.goal);
+    } catch (err) {
+      console.warn(
+        `[campaigns] draft generation failed for person ${p.personId}`,
+        err,
+      );
+      result.skippedDraftFailed += 1;
+      continue;
+    }
+
+    const inserted = await db
+      .insert(campaignRecipient)
+      .values({
+        campaignId,
+        personId: p.personId,
+        contactId: targetContact.id,
+        channel,
+        status: "drafted",
+        draftSubject: draft.draft.subject,
+        draftBody: draft.draft.body,
+        trackingToken: crypto.randomUUID(),
+      })
+      .onConflictDoUpdate({
+        target: [campaignRecipient.campaignId, campaignRecipient.personId],
+        set: {
+          deletedAt: null,
+          contactId: targetContact.id,
+          channel,
+          status: "drafted",
+          draftSubject: draft.draft.subject,
+          draftBody: draft.draft.body,
+          trackingToken: crypto.randomUUID(),
+        },
+        // Only a previously-removed (soft-deleted) row gets revived. An
+        // already-active row hits this branch too (same unique key) but the
+        // WHERE excludes it, so Postgres treats it as DO NOTHING — no row
+        // comes back from .returning(), same as a real conflict no-op.
+        where: isNotNull(campaignRecipient.deletedAt),
+      })
+      .returning({ id: campaignRecipient.id });
+
+    if (inserted.length > 0) result.added += 1;
+    else result.skippedAlreadyRecipient += 1;
+  }
+
+  return result;
+}
+
+// Soft-removes one recipient from a Campaign, regardless of their current
+// status — including an already-sent one. Reversible via restoreRecipient;
+// nothing is actually deleted.
+export async function removeRecipient(
+  db: DrizzleDb,
+  campaignId: number,
+  recipientId: number,
+): Promise<{ removed: boolean }> {
+  const updated = await db
+    .update(campaignRecipient)
+    .set({ deletedAt: new Date() })
+    .where(
+      and(
+        eq(campaignRecipient.id, recipientId),
+        eq(campaignRecipient.campaignId, campaignId),
+        isNull(campaignRecipient.deletedAt),
+      ),
+    )
+    .returning({ id: campaignRecipient.id });
+
+  return { removed: updated.length > 0 };
+}
+
+export async function restoreRecipient(
+  db: DrizzleDb,
+  campaignId: number,
+  recipientId: number,
+): Promise<{ restored: boolean }> {
+  const updated = await db
+    .update(campaignRecipient)
+    .set({ deletedAt: null })
+    .where(
+      and(
+        eq(campaignRecipient.id, recipientId),
+        eq(campaignRecipient.campaignId, campaignId),
+        isNotNull(campaignRecipient.deletedAt),
+      ),
+    )
+    .returning({ id: campaignRecipient.id });
+
+  return { restored: updated.length > 0 };
+}
+
+// Soft-deletes a Campaign — its recipients are left untouched and simply
+// become unreachable through it until restoreCampaign brings it back.
+// Reversible; nothing is actually deleted.
+export async function deleteCampaign(
+  db: DrizzleDb,
+  campaignId: number,
+): Promise<{ deleted: boolean }> {
+  const updated = await db
+    .update(campaign)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(campaign.id, campaignId), isNull(campaign.deletedAt)))
+    .returning({ id: campaign.id });
+
+  return { deleted: updated.length > 0 };
+}
+
+export async function restoreCampaign(
+  db: DrizzleDb,
+  campaignId: number,
+): Promise<{ restored: boolean }> {
+  const updated = await db
+    .update(campaign)
+    .set({ deletedAt: null })
+    .where(and(eq(campaign.id, campaignId), isNotNull(campaign.deletedAt)))
+    .returning({ id: campaign.id });
+
+  return { restored: updated.length > 0 };
+}

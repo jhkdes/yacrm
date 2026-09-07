@@ -187,6 +187,95 @@ function scoreContactPair(
   return { score: Math.min(score, 1), reasons };
 }
 
+// A word-like token worth indexing on: strip anything non-alphabetic, then
+// require at least 2 letters. Excludes bare initials ("W.", "N.") — those
+// are common enough (26-ish buckets) to be useless as a candidate filter,
+// and namesMatchViaSingleInitial's own logic already requires the *other*
+// side of a pair to contribute the real word, so the initial itself never
+// needs to be an index key for that match to still be found.
+function indexableTokens(raw: string): string[] {
+  return raw
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter((token) => token.length > 1);
+}
+
+// Every "name-shaped" token this Contact could plausibly be found under:
+// its own display-name words, plus its identifier's local part split into
+// words (an email like "nadia.kowalski@gmail.com" contributes "nadia" and
+// "kowalski" even though this Contact's displayName might just be "N. K.")
+// — this is what lets the identifier-spells-out-the-name signal
+// (localPartMatchesName) find its candidate pair without a full scan.
+function nameIndexTokens(c: ContactForMatching): string[] {
+  const nameTokens = c.displayName
+    ? indexableTokens(c.displayName.replace(/\s+/g, " "))
+    : [];
+  const atIndex = c.sourceIdentifier.indexOf("@");
+  const localPartTokens =
+    atIndex === -1 ? [] : indexableTokens(c.sourceIdentifier.slice(0, atIndex));
+  return [...new Set([...nameTokens, ...localPartTokens])];
+}
+
+// Builds only the pairs worth ever scoring, instead of every C(n,2)
+// combination. A pair is a candidate if the two Contacts either share an
+// exact identifier (the same_identifier_different_source signal) or share
+// at least one name-shaped token (every other signal — exact/fuzzy/initial
+// name match, and identifier-spells-out-name in either direction — always
+// has both sides land in at least one common token bucket by construction).
+// This trades a small, deliberate recall gap — two names that are *both*
+// misspelled in a way that shares no token at all — for turning what was an
+// O(n²) scan (with an O(len²) edit-distance call for most pairs) into
+// roughly O(n) bucket construction plus work proportional to how many
+// Contacts actually share a name or identifier, which is what made the
+// merges page slow once the Contact count reached the low thousands.
+function findCandidatePairs(
+  contacts: ContactForMatching[],
+): [ContactForMatching, ContactForMatching][] {
+  const byIdentifier = new Map<string, ContactForMatching[]>();
+  const byNameToken = new Map<string, ContactForMatching[]>();
+
+  for (const c of contacts) {
+    const identifierBucket = byIdentifier.get(c.sourceIdentifier);
+    if (identifierBucket) identifierBucket.push(c);
+    else byIdentifier.set(c.sourceIdentifier, [c]);
+
+    for (const token of nameIndexTokens(c)) {
+      const tokenBucket = byNameToken.get(token);
+      if (tokenBucket) tokenBucket.push(c);
+      else byNameToken.set(token, [c]);
+    }
+  }
+
+  const seenPairs = new Set<string>();
+  const pairs: [ContactForMatching, ContactForMatching][] = [];
+
+  function addPairsFromBucket(bucket: ContactForMatching[]) {
+    for (let i = 0; i < bucket.length; i += 1) {
+      for (let j = i + 1; j < bucket.length; j += 1) {
+        const a = bucket[i];
+        const b = bucket[j];
+        if (a.personId === b.personId) continue;
+        const pairKey =
+          a.contactId < b.contactId
+            ? `${a.contactId}:${b.contactId}`
+            : `${b.contactId}:${a.contactId}`;
+        if (seenPairs.has(pairKey)) continue;
+        seenPairs.add(pairKey);
+        pairs.push([a, b]);
+      }
+    }
+  }
+
+  for (const bucket of byIdentifier.values()) {
+    if (bucket.length > 1) addPairsFromBucket(bucket);
+  }
+  for (const bucket of byNameToken.values()) {
+    if (bucket.length > 1) addPairsFromBucket(bucket);
+  }
+
+  return pairs;
+}
+
 // Compares Contacts across different Persons (contacts already on the same
 // Person have nothing to suggest) and returns ranked, deduplicated
 // Person-level suggestions — the strongest Contact-pair evidence found for
@@ -196,32 +285,26 @@ export function generateMergeSuggestions(
 ): MergeSuggestion[] {
   const bestByPersonPair = new Map<string, MergeSuggestion>();
 
-  for (let i = 0; i < contacts.length; i += 1) {
-    for (let j = i + 1; j < contacts.length; j += 1) {
-      const a = contacts[i];
-      const b = contacts[j];
-      if (a.personId === b.personId) continue;
+  for (const [a, b] of findCandidatePairs(contacts)) {
+    const result = scoreContactPair(a, b);
+    if (!result || result.score < MIN_SUGGESTION_SCORE) continue;
 
-      const result = scoreContactPair(a, b);
-      if (!result || result.score < MIN_SUGGESTION_SCORE) continue;
+    const [personAId, personBId] =
+      a.personId < b.personId
+        ? [a.personId, b.personId]
+        : [b.personId, a.personId];
+    const key = `${personAId}:${personBId}`;
 
-      const [personAId, personBId] =
-        a.personId < b.personId
-          ? [a.personId, b.personId]
-          : [b.personId, a.personId];
-      const key = `${personAId}:${personBId}`;
-
-      const existing = bestByPersonPair.get(key);
-      if (!existing || result.score > existing.score) {
-        bestByPersonPair.set(key, {
-          personAId,
-          personBId,
-          contactAId: a.contactId,
-          contactBId: b.contactId,
-          score: result.score,
-          reasons: result.reasons,
-        });
-      }
+    const existing = bestByPersonPair.get(key);
+    if (!existing || result.score > existing.score) {
+      bestByPersonPair.set(key, {
+        personAId,
+        personBId,
+        contactAId: a.contactId,
+        contactBId: b.contactId,
+        score: result.score,
+        reasons: result.reasons,
+      });
     }
   }
 
