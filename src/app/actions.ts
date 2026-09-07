@@ -7,6 +7,23 @@ import { purgeContact, unpurgeIdentifier } from "@/lib/contact-purge";
 import { ImportSummary, importGmailHistory, syncGmailHistory } from "@/lib/gmail-import";
 import { approveAndSendDraft } from "@/lib/gmail-send";
 import {
+  importLinkedInConnections,
+  parseConnectionsCsv,
+} from "@/lib/linkedin-import";
+import {
+  importLinkedInMessages,
+  parseMessagesCsv,
+} from "@/lib/linkedin-messages-import";
+import {
+  addRecipients,
+  CampaignChannel,
+  createCampaign,
+  deleteCampaign,
+  removeRecipient,
+  restoreCampaign,
+  restoreRecipient,
+} from "@/lib/campaigns";
+import {
   dismissMergeSuggestion,
   undismissMergeSuggestion,
 } from "@/lib/merge-dismissals";
@@ -75,6 +92,77 @@ export async function syncGmailAction() {
   } catch (err) {
     console.error("Gmail sync failed", err);
     redirectTarget = `/?import_error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function importLinkedInConnectionsAction(formData: FormData) {
+  const file = formData.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    redirect("/import/linkedin?import_error=missing_file");
+  }
+
+  let redirectTarget: string;
+  try {
+    const csvText = await (file as File).text();
+    const { rows, rowsSkippedNoUrl } = parseConnectionsCsv(csvText);
+    const summary = await importLinkedInConnections(db, rows);
+    redirectTarget = `/import/linkedin?${new URLSearchParams({
+      rows_processed: String(summary.rowsProcessed),
+      rows_skipped_no_url: String(rowsSkippedNoUrl),
+      contacts_created: String(summary.contactsCreated),
+      profile_events_written: String(summary.profileEventsWritten),
+      events_embedded: String(summary.eventsEmbedded),
+    }).toString()}`;
+  } catch (err) {
+    console.error("LinkedIn connections import failed", err);
+    redirectTarget = `/import/linkedin?import_error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function importLinkedInMessagesAction(formData: FormData) {
+  const file = formData.get("file");
+  const ownProfileUrl = formData.get("ownProfileUrl");
+  if (!(file instanceof File) || file.size === 0) {
+    redirect("/import/linkedin?messages_import_error=missing_file");
+  }
+  if (typeof ownProfileUrl !== "string" || !ownProfileUrl.trim()) {
+    redirect("/import/linkedin?messages_import_error=missing_own_profile_url");
+  }
+
+  let redirectTarget: string;
+  try {
+    const csvText = await (file as File).text();
+    const { rows, rowsSkippedEmptyContent, rowsSkippedBadDate } =
+      parseMessagesCsv(csvText);
+    const summary = await importLinkedInMessages(
+      db,
+      rows,
+      ownProfileUrl as string,
+    );
+    redirectTarget = `/import/linkedin?${new URLSearchParams({
+      msg_rows_processed: String(summary.rowsProcessed),
+      msg_rows_skipped_empty: String(rowsSkippedEmptyContent),
+      msg_rows_skipped_bad_date: String(rowsSkippedBadDate),
+      msg_rows_skipped_group: String(summary.rowsSkippedGroupConversation),
+      msg_rows_skipped_unresolvable: String(summary.rowsSkippedUnresolvable),
+      msg_contacts_created: String(summary.contactsCreated),
+      msg_contacts_pending: String(summary.contactsPending),
+      msg_contacts_promoted: String(summary.contactsPromoted),
+      msg_events_created: String(summary.eventsCreated),
+      msg_events_skipped_duplicate: String(summary.eventsSkippedDuplicate),
+      msg_events_embedded: String(summary.eventsEmbedded),
+    }).toString()}`;
+  } catch (err) {
+    console.error("LinkedIn messages import failed", err);
+    redirectTarget = `/import/linkedin?messages_import_error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
   }
@@ -291,6 +379,214 @@ export async function sendDraftAction(formData: FormData) {
     redirectTarget = draftUrl({
       sendError: err instanceof Error ? err.message : "unknown_error",
     });
+  }
+
+  redirect(redirectTarget);
+}
+
+function isCampaignChannel(value: unknown): value is CampaignChannel {
+  return value === "email" || value === "linkedin";
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export async function createCampaignAction(formData: FormData) {
+  const name = formData.get("name");
+  const goal = formData.get("goal");
+  const channel = formData.get("channel");
+  const destinationUrl = formData.get("destinationUrl");
+  const personIds = formData
+    .getAll("personIds")
+    .map((v) => Number(v))
+    .filter((n) => Number.isInteger(n));
+
+  if (
+    typeof name !== "string" ||
+    !name.trim() ||
+    typeof goal !== "string" ||
+    !goal.trim() ||
+    !isCampaignChannel(channel) ||
+    typeof destinationUrl !== "string" ||
+    !isValidHttpUrl(destinationUrl) ||
+    personIds.length === 0
+  ) {
+    redirect(
+      `/campaigns?${new URLSearchParams({
+        goal: typeof goal === "string" ? goal : "",
+        error: "invalid_campaign_request",
+      }).toString()}`,
+    );
+  }
+
+  let redirectTarget: string;
+  try {
+    const { campaignId } = await createCampaign(
+      db,
+      name as string,
+      goal as string,
+      destinationUrl as string,
+    );
+    const result = await addRecipients(
+      db,
+      campaignId,
+      personIds.map((personId) => ({ personId })),
+      channel as CampaignChannel,
+    );
+    redirectTarget = `/campaigns/${campaignId}?${new URLSearchParams({
+      added: String(result.added),
+      skipped_no_contact: String(result.skippedNoContactForChannel),
+      skipped_draft_failed: String(result.skippedDraftFailed),
+    }).toString()}`;
+  } catch (err) {
+    console.error("Campaign creation failed", err);
+    redirectTarget = `/campaigns?${new URLSearchParams({
+      goal: goal as string,
+      error: err instanceof Error ? err.message : "unknown_error",
+    }).toString()}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function addRecipientsToCampaignAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  const channel = formData.get("channel");
+  const personIds = formData
+    .getAll("personIds")
+    .map((v) => Number(v))
+    .filter((n) => Number.isInteger(n));
+
+  if (
+    !Number.isInteger(campaignId) ||
+    !isCampaignChannel(channel) ||
+    personIds.length === 0
+  ) {
+    redirect(`/campaigns/${campaignId}?error=invalid_add_request`);
+  }
+
+  let redirectTarget: string;
+  try {
+    const result = await addRecipients(
+      db,
+      campaignId,
+      personIds.map((personId) => ({ personId })),
+      channel as CampaignChannel,
+    );
+    redirectTarget = `/campaigns/${campaignId}?${new URLSearchParams({
+      added: String(result.added),
+      skipped_no_contact: String(result.skippedNoContactForChannel),
+      skipped_draft_failed: String(result.skippedDraftFailed),
+      skipped_already: String(result.skippedAlreadyRecipient),
+    }).toString()}`;
+  } catch (err) {
+    console.error("Adding recipients to campaign failed", err);
+    redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function removeCampaignRecipientAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  const recipientId = Number(formData.get("recipientId"));
+
+  if (!Number.isInteger(campaignId) || !Number.isInteger(recipientId)) {
+    redirect(`/campaigns/${campaignId}?error=invalid_remove_request`);
+  }
+
+  let redirectTarget: string;
+  try {
+    const { removed } = await removeRecipient(db, campaignId, recipientId);
+    // undo_recipient_id drives a one-shot "Undo" link on the campaign page —
+    // present only on this redirect, so it disappears the moment the user
+    // navigates anywhere else (no persistent "recently removed" list).
+    redirectTarget = removed
+      ? `/campaigns/${campaignId}?removed=1&undo_recipient_id=${recipientId}`
+      : `/campaigns/${campaignId}?error=recipient_not_found`;
+  } catch (err) {
+    console.error("Removing campaign recipient failed", err);
+    redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function restoreCampaignRecipientAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  const recipientId = Number(formData.get("recipientId"));
+
+  if (!Number.isInteger(campaignId) || !Number.isInteger(recipientId)) {
+    redirect(`/campaigns/${campaignId}?error=invalid_restore_request`);
+  }
+
+  let redirectTarget: string;
+  try {
+    const { restored } = await restoreRecipient(db, campaignId, recipientId);
+    redirectTarget = `/campaigns/${campaignId}?${
+      restored ? "restored=1" : "error=recipient_not_found"
+    }`;
+  } catch (err) {
+    console.error("Restoring campaign recipient failed", err);
+    redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function deleteCampaignAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  if (!Number.isInteger(campaignId)) {
+    redirect("/campaigns?error=invalid_delete_request");
+  }
+
+  let redirectTarget: string;
+  try {
+    const { deleted } = await deleteCampaign(db, campaignId);
+    // Same one-shot pattern as recipient removal — undo_campaign_id only
+    // rides along on this redirect.
+    redirectTarget = deleted
+      ? `/campaigns?campaign_deleted=1&undo_campaign_id=${campaignId}`
+      : "/campaigns?error=campaign_not_found";
+  } catch (err) {
+    console.error("Deleting campaign failed", err);
+    redirectTarget = `/campaigns?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function restoreCampaignAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  if (!Number.isInteger(campaignId)) {
+    redirect("/campaigns?error=invalid_restore_request");
+  }
+
+  let redirectTarget: string;
+  try {
+    const { restored } = await restoreCampaign(db, campaignId);
+    redirectTarget = restored
+      ? `/campaigns/${campaignId}?campaign_restored=1`
+      : "/campaigns?error=campaign_not_found";
+  } catch (err) {
+    console.error("Restoring campaign failed", err);
+    redirectTarget = `/campaigns?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
   }
 
   redirect(redirectTarget);

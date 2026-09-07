@@ -13,6 +13,9 @@ export default defineConfig({
     // headroom under load either way.
     fileParallelism: false,
     hookTimeout: 30_000,
+    // apps/redirect is a separate, independently deployed Next.js app with
+    // its own package.json/node_modules — not part of this project's tests.
+    exclude: ["**/node_modules/**", "apps/redirect/**"],
   },
   resolve: {
     alias: {

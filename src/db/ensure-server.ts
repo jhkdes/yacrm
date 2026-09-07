@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import path from "node:path";
 
-import { PGLITE_HOST, PGLITE_PORT } from "./connection";
+import { IS_REMOTE_DATABASE, PGLITE_HOST, PGLITE_PORT } from "./connection";
 
 function isPortOpen(): Promise<boolean> {
   return new Promise((resolve) => {
@@ -37,7 +37,12 @@ function spawnServer(): void {
 // detached background process on demand. Safe to call from multiple
 // processes at once — at most one spawn attempt actually wins the server's
 // own port bind; everyone else just finds it already listening.
+//
+// No-op when DATABASE_URL points at a remote Postgres (e.g. Supabase) —
+// there's no local server to start, and isPortOpen() would just spin
+// against 127.0.0.1 for nothing.
 export async function ensurePgliteServerRunning(): Promise<void> {
+  if (IS_REMOTE_DATABASE) return;
   if (await isPortOpen()) return;
 
   spawnServer();

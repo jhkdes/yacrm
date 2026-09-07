@@ -24,6 +24,25 @@ export const eventDirectionEnum = pgEnum("event_direction", [
   "outbound",
 ]);
 
+export const campaignTypeEnum = pgEnum("campaign_type", [
+  "interview_link",
+  "intro",
+]);
+
+export const campaignRecipientChannelEnum = pgEnum(
+  "campaign_recipient_channel",
+  ["email", "linkedin"],
+);
+
+// Ordered funnel stages. "opened" is email-only (LinkedIn has no
+// read-receipt API to observe it — see docs/outreach-roadmap.md).
+// "completed" is terminal: once reached it's never overwritten by an
+// out-of-order opened/clicked event arriving after it.
+export const campaignRecipientStatusEnum = pgEnum(
+  "campaign_recipient_status",
+  ["drafted", "sent", "opened", "clicked", "completed"],
+);
+
 // "pending" = only one-way messages seen so far (not yet a confirmed
 // two-way personal contact); "active" = a real back-and-forth exists.
 // Pending Contacts are still persisted (not discarded) so that a later
@@ -164,8 +183,81 @@ export const event = pgTable(
   (table) => [unique().on(table.contactId, table.sourceMessageId)],
 );
 
+export const campaign = pgTable("campaign", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  name: text("name").notNull(),
+  // Free text fed to both rankPeopleForCampaign (targeting) and
+  // generateDraftForPerson (drafting) — the same goal string drives both.
+  goal: text("goal").notNull(),
+  type: campaignTypeEnum("type").notNull().default("interview_link"),
+  // Where a recipient's tracked link (see src/lib/click-tracking.ts) sends
+  // them — e.g. the AI-interview study URL. Null for an "intro" campaign,
+  // which has no tracked link at all.
+  destinationUrl: text("destination_url"),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  // Soft delete: null = active. A Campaign's drafts and any real send/click
+  // history have no external source to re-derive from (unlike a purged
+  // Gmail Contact, whose messages still exist on Gmail's servers) — a
+  // "delete" that couldn't be undone would be a genuine, permanent data
+  // loss, not just an inconvenience.
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+});
+
+export const campaignRecipient = pgTable(
+  "campaign_recipient",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    campaignId: integer("campaign_id")
+      .notNull()
+      .references(() => campaign.id, { onDelete: "cascade" }),
+    personId: integer("person_id")
+      .notNull()
+      .references(() => person.id),
+    // The specific Contact (and therefore channel/address) this campaign is
+    // reaching this Person through.
+    contactId: integer("contact_id")
+      .notNull()
+      .references(() => contact.id),
+    channel: campaignRecipientChannelEnum("channel").notNull(),
+    status: campaignRecipientStatusEnum("status")
+      .notNull()
+      .default("drafted"),
+    draftSubject: text("draft_subject"),
+    draftBody: text("draft_body").notNull(),
+    // Per-recipient token embedded in their outreach link — how a click is
+    // attributed back to this row (see M18 in
+    // docs/technical-design-and-milestones.md).
+    trackingToken: text("tracking_token").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    openedAt: timestamp("opened_at", { withTimezone: true }),
+    clickedAt: timestamp("clicked_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    // Independent of `status` — a follow-up doesn't move a recipient
+    // backward through the funnel, it's an orthogonal "we nudged them" fact
+    // (see M23 in docs/technical-design-and-milestones.md).
+    followedUpAt: timestamp("followed_up_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    // Soft delete for the same reason as campaign.deletedAt — removing a
+    // recipient (possibly an already-sent one) shouldn't be an unrecoverable
+    // mistake. The (campaignId, personId) unique constraint deliberately
+    // still counts a soft-deleted row, so addRecipients revives it (see
+    // src/lib/campaigns.ts) instead of colliding with a dead row it can't
+    // see past.
+    deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  },
+  (table) => [
+    unique().on(table.campaignId, table.personId),
+    unique().on(table.trackingToken),
+  ],
+);
+
 export const personRelations = relations(person, ({ many }) => ({
   contacts: many(contact),
+  campaignRecipients: many(campaignRecipient),
 }));
 
 export const contactRelations = relations(contact, ({ one, many }) => ({
@@ -182,3 +274,25 @@ export const eventRelations = relations(event, ({ one }) => ({
     references: [contact.id],
   }),
 }));
+
+export const campaignRelations = relations(campaign, ({ many }) => ({
+  recipients: many(campaignRecipient),
+}));
+
+export const campaignRecipientRelations = relations(
+  campaignRecipient,
+  ({ one }) => ({
+    campaign: one(campaign, {
+      fields: [campaignRecipient.campaignId],
+      references: [campaign.id],
+    }),
+    person: one(person, {
+      fields: [campaignRecipient.personId],
+      references: [person.id],
+    }),
+    contact: one(contact, {
+      fields: [campaignRecipient.contactId],
+      references: [contact.id],
+    }),
+  }),
+);

@@ -362,7 +362,7 @@ export async function runGmailImport(
         db,
         "gmail",
         {
-          email: candidate.otherPartyEmail,
+          identifier: candidate.otherPartyEmail,
           name: candidate.payload.otherPartyName,
         },
         status,

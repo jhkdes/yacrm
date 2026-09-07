@@ -50,6 +50,17 @@ yarn-error.log*
 # vercel
 .vercel
 
+# Claude Code — personal/local permission overrides, not shared project config
+.claude/settings.local.json
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# apps/redirect — separate deployable app, own node_modules/build output
+apps/redirect/node_modules
+apps/redirect/.next/
+apps/redirect/out/
+apps/redirect/.vercel
+apps/redirect/*.tsbuildinfo
+apps/redirect/next-env.d.ts

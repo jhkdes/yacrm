@@ -2,9 +2,17 @@ import { and, eq } from "drizzle-orm";
 
 import { contact, event, person } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
-import type { ParsedAddress } from "@/lib/gmail-parsing";
 
 type ContactStatus = "pending" | "active";
+
+// A source-native identity: an email address for gmail/hotmail, a phone
+// number for sms, a profile URL for linkedin. Named generically (not
+// ParsedAddress/email) because `sourceIdentifier` is not always an email
+// address.
+export interface ContactIdentity {
+  name: string | null;
+  identifier: string;
+}
 
 export interface ContactResolutionResult {
   contactId: number;
@@ -15,7 +23,7 @@ export interface ContactResolutionResult {
   wasPromoted: boolean;
 }
 
-// Finds the existing Contact for a (source, email) pair, or creates a new
+// Finds the existing Contact for a (source, identifier) pair, or creates a new
 // solo Person + Contact for it. Every Contact belongs to exactly one Person
 // from the moment it's created — merging later reassigns personId rather
 // than ever leaving a Contact orphaned.
@@ -28,13 +36,13 @@ export interface ContactResolutionResult {
 export async function findOrCreateContact(
   db: DrizzleDb,
   source: "gmail" | "hotmail" | "linkedin" | "sms",
-  address: ParsedAddress,
+  identity: ContactIdentity,
   status: ContactStatus = "active",
 ): Promise<ContactResolutionResult> {
   const existing = await db.query.contact.findFirst({
     where: and(
       eq(contact.source, source),
-      eq(contact.sourceIdentifier, address.email),
+      eq(contact.sourceIdentifier, identity.identifier),
     ),
   });
   if (existing) {
@@ -60,15 +68,15 @@ export async function findOrCreateContact(
 
   const [newPerson] = await db
     .insert(person)
-    .values({ name: address.name ?? address.email })
+    .values({ name: identity.name ?? identity.identifier })
     .returning();
   const [newContact] = await db
     .insert(contact)
     .values({
       personId: newPerson.id,
       source,
-      sourceIdentifier: address.email,
-      displayName: address.name,
+      sourceIdentifier: identity.identifier,
+      displayName: identity.name,
       status,
     })
     .returning();

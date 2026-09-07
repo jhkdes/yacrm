@@ -43,6 +43,9 @@ export default async function Home({
       <p>
         <a href="/contacts">View contacts</a>
       </p>
+      <p>
+        <a href="/import/linkedin">Import LinkedIn connections</a>
+      </p>
 
       {params.gmail_connected && (
         <p style={{ color: "green" }}>

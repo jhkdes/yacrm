@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // apps/redirect is a separate, independently deployed Next.js app with
+    // its own package.json/node_modules/eslint setup — not part of this
+    // project's lint run.
+    "apps/redirect/**",
   ]),
 ]);
 
