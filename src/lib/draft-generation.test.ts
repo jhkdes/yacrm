@@ -198,6 +198,16 @@ describe("buildDraftPrompt", () => {
 
     expect(system).toContain("{{LINK}}");
   });
+
+  it("instructs the model to write in an informal, human founder voice instead of AI-slop", () => {
+    const context = contextFor({});
+    const { system } = buildDraftPrompt(context, "goal");
+
+    expect(system).toMatch(/informal.*founder/i);
+    expect(system).toMatch(/throat-clearing/i);
+    expect(system).toMatch(/contractions/i);
+    expect(system).toMatch(/buzzwords/i);
+  });
 });
 
 describe("fillLinkPlaceholder", () => {
