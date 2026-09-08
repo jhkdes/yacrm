@@ -27,8 +27,8 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M19 | Email send wired to tracking | ✅ Done | 2 | M17, M18 | Sending a real email marks `sent`, and an open registers via the pixel |
 | M20 | Completion webhook | ✅ Done | 2 | M17 | A synthetic completion POST flips a recipient to `completed` |
 | M21 | LinkedIn copy-assist queue | ✅ Done | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
-| M22 | Campaign dashboard + CSV export | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
-| M23 | 3-day follow-up job | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
+| M22 | Campaign dashboard + CSV export | ✅ Done | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
+| M23 | 3-day follow-up job | ✅ Done | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
 | M24 | Calendar read + meeting import | 4 | — | Calendar events land as `meeting` rows with attendees linked |
 | M25 | Attendee-to-contact matching | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
 | M26 | Last-touched staleness view | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
@@ -241,6 +241,12 @@ Manually verified twice: first with a synthetic completion payload against live 
 - Unit: `needsFollowUp` against fixtures for every status × age combination — this is the core logic and it's fully pure, so it's the cheapest and most important test in this milestone.
 - Integration (pglite): `findRecipientsNeedingFollowUp` against seeded rows with controlled `sentAt`/`status`/`followedUpAt` values.
 - Manual: `scripts/run-follow-ups.ts` invoking `sendFollowUps` directly against real data once ready to trust it unattended; only wire the actual cron trigger after that's been eyeballed at least once.
+
+**Shipped as** `src/lib/follow-up.ts`, `src/app/api/cron/follow-ups/route.ts`, `scripts/run-follow-ups.ts`.
+
+**Deviation from the plan above**: for a `linkedin`-channel recipient, `sendFollowUps` does not "send" anything — there's no API to do that, and this app never automates a LinkedIn send (see the outreach roadmap's ToS decision, same as M21). Instead it drafts the nudge, writes it into `draftSubject`/`draftBody`, and sets `status` back to `"drafted"` — which puts it right back into the M21 copy-assist queue for the user to actually send by hand. `followedUpAt` is still set at that point (not deferred until the user manually sends), so the automated half of this job only ever runs once per recipient regardless of channel. `status` is otherwise left untouched by a follow-up (per the `followedUpAt` column comment in `schema.ts` — it's an independent fact, not a funnel transition) except for this one LinkedIn re-queue, which is a deliberate, one-time exception to get the draft back in front of the user.
+
+New env var: `FOLLOW_UP_CRON_SECRET`, checked as a Bearer header on `POST /api/cron/follow-ups`. Unlike the M18/M19/M20 tracking routes, this route is excluded from `src/proxy.ts`'s access gate — it's the real production entry point an external scheduler hits with no browser session, not a local-testing fallback — and relies on its own fail-closed secret check instead.
 
 ---
 

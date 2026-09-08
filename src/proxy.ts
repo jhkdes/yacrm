@@ -25,6 +25,16 @@ export async function proxy(request: NextRequest) {
 // already-authenticated browser mid-flow. A local curl test against this
 // app's webhook route needs the access-gate cookie included, same as any
 // other route here — that's expected, not a bug.
+//
+// /api/cron/follow-ups IS excluded, unlike those — this app has no
+// apps/redirect equivalent for the follow-up job, so this route is the
+// real production entrypoint an external scheduler (Vercel Cron, a curl in
+// a cron job) hits directly with no browser session to carry the
+// yacrm_auth cookie. It fails closed on its own bearer-secret check
+// (FOLLOW_UP_CRON_SECRET — see its route.ts) instead, the same fail-closed
+// standard as every other gate in this app, just checked a different way.
 export const config = {
-  matcher: ["/((?!login|_next/static|_next/image|favicon.ico).*)"],
+  matcher: [
+    "/((?!login|_next/static|_next/image|favicon.ico|api/cron/follow-ups).*)",
+  ],
 };
