@@ -92,3 +92,38 @@ export async function sendCampaignRecipientEmail(
     .set({ status: "sent", sentAt: new Date() })
     .where(eq(campaignRecipient.id, recipientId));
 }
+
+// M21's LinkedIn "send": there's no API to actually deliver the message
+// (see docs/outreach-roadmap.md's decision to stay within LinkedIn's terms
+// of service — this app never automates a LinkedIn send), so this just
+// records that the user did it themselves after copy-pasting the draft
+// from the copy-assist queue. No pixel, no event recorded on the Person's
+// timeline the way an email send gets one — a LinkedIn message sent
+// outside this app isn't something we have the actual content or a
+// message id for, unlike a Gmail send.
+export async function markLinkedInRecipientSent(
+  db: DrizzleDb,
+  recipientId: number,
+): Promise<void> {
+  const recipient = await db.query.campaignRecipient.findFirst({
+    where: eq(campaignRecipient.id, recipientId),
+  });
+  if (!recipient) throw new CampaignRecipientNotFoundError(recipientId);
+  if (recipient.channel !== "linkedin") {
+    throw new CampaignRecipientNotSendableError(
+      recipientId,
+      `channel is "${recipient.channel}", not "linkedin"`,
+    );
+  }
+  if (recipient.status !== "drafted") {
+    throw new CampaignRecipientNotSendableError(
+      recipientId,
+      `status is "${recipient.status}", not "drafted"`,
+    );
+  }
+
+  await db
+    .update(campaignRecipient)
+    .set({ status: "sent", sentAt: new Date() })
+    .where(eq(campaignRecipient.id, recipientId));
+}

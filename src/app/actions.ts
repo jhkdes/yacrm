@@ -28,7 +28,10 @@ import {
   restoreCampaign,
   restoreRecipient,
 } from "@/lib/campaigns";
-import { sendCampaignRecipientEmail } from "@/lib/campaign-send";
+import {
+  markLinkedInRecipientSent,
+  sendCampaignRecipientEmail,
+} from "@/lib/campaign-send";
 import {
   dismissMergeSuggestion,
   undismissMergeSuggestion,
@@ -611,6 +614,29 @@ export async function sendCampaignRecipientAction(formData: FormData) {
   } catch (err) {
     console.error("Campaign recipient send failed", err);
     redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function markLinkedinRecipientSentAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  const recipientId = Number(formData.get("recipientId"));
+  const queueUrl = `/campaigns/${campaignId}/linkedin-queue`;
+
+  if (!Number.isInteger(campaignId) || !Number.isInteger(recipientId)) {
+    redirect(`${queueUrl}?error=invalid_request`);
+  }
+
+  let redirectTarget: string;
+  try {
+    await markLinkedInRecipientSent(db, recipientId);
+    redirectTarget = `${queueUrl}?sent=1`;
+  } catch (err) {
+    console.error("Marking LinkedIn recipient sent failed", err);
+    redirectTarget = `${queueUrl}?error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
   }
