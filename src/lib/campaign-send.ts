@@ -4,6 +4,7 @@ import { campaignRecipient } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
 import { createGmailClient } from "@/lib/gmail-import";
 import { recordSentEvent, sendGmailMessage } from "@/lib/gmail-send";
+import { buildTrackedLinkUrl, buildTrackingPixelUrl } from "@/lib/tracked-link";
 
 export class CampaignRecipientNotFoundError extends Error {
   constructor(recipientId: number) {
@@ -15,23 +16,6 @@ export class CampaignRecipientNotSendableError extends Error {
   constructor(recipientId: number, reason: string) {
     super(`Campaign Recipient ${recipientId} can't be sent: ${reason}`);
   }
-}
-
-// A relative "/api/r/[token]" (this app's own local-testing fallback route
-// from M18) is useless inside an actual sent email — there's no browser
-// origin for a mail client to resolve it against. Unlike the campaign
-// detail page's display-only fallback, a real send has no safe fallback:
-// this app's own route isn't reachable by a real recipient anyway (it's
-// behind the access gate — see src/proxy.ts), so failing loudly here beats
-// silently emailing someone a broken or gated link.
-function requireRedirectBaseUrl(): string {
-  const base = process.env.REDIRECT_BASE_URL;
-  if (!base) {
-    throw new Error(
-      "REDIRECT_BASE_URL must be set to send a real campaign email — without it, the tracked link and open pixel would point somewhere a real recipient can't reach.",
-    );
-  }
-  return base.replace(/\/+$/, "");
 }
 
 // Sends one email-channel Campaign Recipient's already-generated draft for
@@ -63,9 +47,8 @@ export async function sendCampaignRecipientEmail(
     );
   }
 
-  const baseUrl = requireRedirectBaseUrl();
-  const trackedLinkUrl = `${baseUrl}/${recipient.trackingToken}`;
-  const trackingPixelUrl = `${baseUrl}/pixel/${recipient.trackingToken}`;
+  const trackedLinkUrl = buildTrackedLinkUrl(recipient.trackingToken);
+  const trackingPixelUrl = buildTrackingPixelUrl(recipient.trackingToken);
   const subject = recipient.draftSubject ?? "";
 
   const { gmail, ownEmail } = await createGmailClient(db, accountId);

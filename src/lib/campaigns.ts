@@ -3,7 +3,8 @@ import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { campaign, campaignRecipient, contact } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
 import type { CampaignRankingEntry } from "@/lib/campaign-ranking";
-import { generateDraftForPerson } from "@/lib/draft-generation";
+import { fillLinkPlaceholder, generateDraftForPerson } from "@/lib/draft-generation";
+import { buildTrackedLinkUrl, requireRedirectBaseUrl } from "@/lib/tracked-link";
 
 export type CampaignChannel = "email" | "linkedin";
 export type CampaignType = "interview_link" | "intro";
@@ -64,6 +65,15 @@ export interface AddRecipientsResult {
 // harmless. A Person who was previously removed (soft-deleted) is revived
 // with a fresh draft/token instead of colliding with their dead row — see
 // the ON CONFLICT ... WHERE clause below.
+//
+// When the Campaign has a destinationUrl, the real tracked link is
+// substituted into the draft body right here — via fillLinkPlaceholder,
+// replacing the {{LINK}} placeholder the draft-generation prompt asks the
+// model to use — so what's stored in draftBody is already correct and
+// complete for both channels. This is deliberately not deferred to send
+// time: LinkedIn's "send" is a manual copy-paste with no send-time
+// processing step at all (see M21), so if the link isn't already baked
+// into the stored text, it never gets in at all.
 export async function addRecipients(
   db: DrizzleDb,
   campaignId: number,
@@ -71,10 +81,18 @@ export async function addRecipients(
   channel: CampaignChannel,
 ): Promise<AddRecipientsResult> {
   const [campaignRow] = await db
-    .select({ goal: campaign.goal })
+    .select({ goal: campaign.goal, destinationUrl: campaign.destinationUrl })
     .from(campaign)
     .where(and(eq(campaign.id, campaignId), isNull(campaign.deletedAt)));
   if (!campaignRow) throw new CampaignNotFoundError(campaignId);
+
+  // Checked once, up front, rather than per-person inside the loop below —
+  // a missing REDIRECT_BASE_URL is an environment-level misconfiguration,
+  // not a per-person condition, so failing the whole call immediately
+  // beats burning an LLM call per person before discovering it.
+  if (campaignRow.destinationUrl) {
+    requireRedirectBaseUrl();
+  }
 
   const result: AddRecipientsResult = {
     added: 0,
@@ -112,6 +130,15 @@ export async function addRecipients(
       continue;
     }
 
+    // Generated once and reused for both the tracked-link substitution and
+    // the stored trackingToken column — those two must always be the exact
+    // same value, or the link baked into the draft text would point at a
+    // token the DB doesn't recognize.
+    const trackingToken = crypto.randomUUID();
+    const draftBody = campaignRow.destinationUrl
+      ? fillLinkPlaceholder(draft.draft.body, buildTrackedLinkUrl(trackingToken))
+      : draft.draft.body;
+
     const inserted = await db
       .insert(campaignRecipient)
       .values({
@@ -121,8 +148,8 @@ export async function addRecipients(
         channel,
         status: "drafted",
         draftSubject: draft.draft.subject,
-        draftBody: draft.draft.body,
-        trackingToken: crypto.randomUUID(),
+        draftBody,
+        trackingToken,
       })
       .onConflictDoUpdate({
         target: [campaignRecipient.campaignId, campaignRecipient.personId],
@@ -132,8 +159,8 @@ export async function addRecipients(
           channel,
           status: "drafted",
           draftSubject: draft.draft.subject,
-          draftBody: draft.draft.body,
-          trackingToken: crypto.randomUUID(),
+          draftBody,
+          trackingToken,
         },
         // Only a previously-removed (soft-deleted) row gets revived. An
         // already-active row hits this branch too (same unique key) but the

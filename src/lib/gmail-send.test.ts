@@ -56,7 +56,7 @@ describe("buildRawEmail", () => {
       from: "me@example.com",
       to: "ada@example.com",
       subject: "Try it out",
-      body: "Hi Ada,\n\nGive this a try.",
+      body: "Hi Ada,\n\nGive this a try: https://redirect.example.com/tok123",
       trackedLinkUrl: "https://redirect.example.com/tok123",
       trackingPixelUrl: "https://redirect.example.com/pixel/tok123",
     });
@@ -64,14 +64,15 @@ describe("buildRawEmail", () => {
     const { headers, body } = decode(raw);
     expect(headers["Content-Type"]).toMatch(/^multipart\/alternative; boundary="/);
 
-    // Plain-text part: original body plus the bare (auto-linkifying) URL.
-    expect(body).toContain("Hi Ada,\n\nGive this a try.");
-    expect(body).toContain("https://redirect.example.com/tok123");
-
-    // HTML part: escaped body, a real anchor, and a hidden 1x1 pixel.
-    expect(body).toContain("Hi Ada,<br>\n<br>\nGive this a try.");
+    // Plain-text part: body verbatim, unchanged — the link is already inline.
     expect(body).toContain(
-      '<a href="https://redirect.example.com/tok123">https://redirect.example.com/tok123</a>',
+      "Hi Ada,\n\nGive this a try: https://redirect.example.com/tok123",
+    );
+
+    // HTML part: escaped body with the link wrapped in place as a real
+    // anchor (not appended separately), plus a hidden 1x1 pixel.
+    expect(body).toContain(
+      'Hi Ada,<br>\n<br>\nGive this a try: <a href="https://redirect.example.com/tok123">https://redirect.example.com/tok123</a>',
     );
     expect(body).toContain(
       '<img src="https://redirect.example.com/pixel/tok123" width="1" height="1" alt="" style="display:none">',
