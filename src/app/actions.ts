@@ -30,6 +30,7 @@ import {
 } from "@/lib/campaigns";
 import {
   markLinkedInRecipientSent,
+  sendAllDraftedCampaignEmails,
   sendCampaignRecipientEmail,
 } from "@/lib/campaign-send";
 import {
@@ -613,6 +614,40 @@ export async function sendCampaignRecipientAction(formData: FormData) {
     redirectTarget = `/campaigns/${campaignId}?sent_recipient=1`;
   } catch (err) {
     console.error("Campaign recipient send failed", err);
+    redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+// Sends every still-drafted email-channel recipient of one Campaign in one
+// click — the bulk counterpart to sendCampaignRecipientAction, for
+// reviewing a batch (e.g. a day's worth of follow-ups queued by the M23
+// cron job) and sending it all at once instead of one at a time.
+export async function sendAllCampaignRecipientsAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+
+  if (!Number.isInteger(campaignId)) {
+    redirect(`/campaigns/${campaignId}?error=invalid_send_request`);
+  }
+
+  const account = await findGmailAccount();
+  if (!account) {
+    redirect(`/campaigns/${campaignId}?error=no_gmail_account`);
+  }
+
+  let redirectTarget: string;
+  try {
+    const { sent, failed } = await sendAllDraftedCampaignEmails(
+      db,
+      account.id,
+      campaignId,
+    );
+    redirectTarget = `/campaigns/${campaignId}?sent_all=${sent}&sent_all_failed=${failed}`;
+  } catch (err) {
+    console.error("Campaign bulk send failed", err);
     redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;

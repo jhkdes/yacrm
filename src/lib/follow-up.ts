@@ -1,15 +1,11 @@
 import { and, eq, isNull, lte, or } from "drizzle-orm";
 
-import { campaign, campaignRecipient, contact } from "@/db/schema";
+import { campaign, campaignRecipient, contact, person } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
 import { fillLinkPlaceholder, generateDraftForPerson } from "@/lib/draft-generation";
 import { createGmailClient } from "@/lib/gmail-import";
-import { recordSentEvent, sendGmailMessage } from "@/lib/gmail-send";
-import {
-  buildTrackedLinkUrl,
-  buildTrackingPixelUrl,
-  requireRedirectBaseUrl,
-} from "@/lib/tracked-link";
+import { sendGmailMessage } from "@/lib/gmail-send";
+import { buildTrackedLinkUrl, requireRedirectBaseUrl } from "@/lib/tracked-link";
 
 const FOLLOW_UP_DELAY_MS = 3 * 24 * 60 * 60 * 1000;
 
@@ -40,9 +36,12 @@ export function needsFollowUp(
 export interface FollowUpCandidate {
   id: number;
   personId: number;
+  personName: string;
   contactId: number;
   channel: "email" | "linkedin";
   contactIdentifier: string;
+  campaignId: number;
+  campaignName: string;
   campaignGoal: string;
   destinationUrl: string | null;
   trackingToken: string;
@@ -63,6 +62,7 @@ export async function findRecipientsNeedingFollowUp(
     .select({
       id: campaignRecipient.id,
       personId: campaignRecipient.personId,
+      personName: person.name,
       contactId: campaignRecipient.contactId,
       channel: campaignRecipient.channel,
       status: campaignRecipient.status,
@@ -70,12 +70,15 @@ export async function findRecipientsNeedingFollowUp(
       followedUpAt: campaignRecipient.followedUpAt,
       trackingToken: campaignRecipient.trackingToken,
       contactIdentifier: contact.sourceIdentifier,
+      campaignId: campaign.id,
+      campaignName: campaign.name,
       campaignGoal: campaign.goal,
       destinationUrl: campaign.destinationUrl,
     })
     .from(campaignRecipient)
     .innerJoin(campaign, eq(campaignRecipient.campaignId, campaign.id))
     .innerJoin(contact, eq(campaignRecipient.contactId, contact.id))
+    .innerJoin(person, eq(campaignRecipient.personId, person.id))
     .where(
       and(
         isNull(campaignRecipient.deletedAt),
@@ -94,45 +97,50 @@ export async function findRecipientsNeedingFollowUp(
     .map((r) => ({
       id: r.id,
       personId: r.personId,
+      personName: r.personName,
       contactId: r.contactId,
       channel: r.channel,
       contactIdentifier: r.contactIdentifier,
+      campaignId: r.campaignId,
+      campaignName: r.campaignName,
       campaignGoal: r.campaignGoal,
       destinationUrl: r.destinationUrl,
       trackingToken: r.trackingToken,
     }));
 }
 
-export interface FollowUpSummary {
-  emailsSent: number;
-  // LinkedIn sending is always manual (see docs/outreach-roadmap.md's
-  // decision to stay within LinkedIn's terms of service) — there's no
-  // automated "send" to do here. What this job does for a LinkedIn
-  // recipient is generate the nudge and put it back in the M21 copy-assist
-  // queue (status: "drafted") for the user to actually send.
-  linkedinQueued: number;
-  skippedDraftFailed: number;
-  skippedNoGmailAccount: number;
+export interface QueuedFollowUp {
+  campaignId: number;
+  campaignName: string;
+  personName: string;
+  channel: "email" | "linkedin";
+  draftSubject: string | null;
 }
 
-// Full pipeline: finds every recipient due for a nudge, drafts a short
-// follow-up against the same campaign goal (amended so the model writes a
-// brief reminder rather than repeating the original pitch), sends it
-// (email) or re-queues it (linkedin), and marks followedUpAt so it's never
-// picked up twice.
-export async function sendFollowUps(
+export interface PrepareFollowUpsResult {
+  queued: QueuedFollowUp[];
+  skippedDraftFailed: number;
+}
+
+// Full pipeline, but deliberately does NOT send anything — nothing goes out
+// to a real person without an explicit, logged-in decision to send it (the
+// user's own call: they want to review every outbound message, follow-ups
+// included, before it leaves). For every recipient due for a nudge, this
+// drafts a short follow-up against the same campaign goal (amended so the
+// model writes a brief reminder rather than repeating the original pitch),
+// writes it into draftSubject/draftBody, and resets status back to
+// "drafted" — which puts it in front of the existing per-recipient "Send"
+// button (email) or the M21 copy-assist queue (linkedin) exactly like a
+// fresh, never-sent draft. followedUpAt is set regardless of channel so a
+// recipient is never re-queued by a later run.
+export async function prepareFollowUps(
   db: DrizzleDb,
   now: Date = new Date(),
-): Promise<FollowUpSummary> {
-  const summary: FollowUpSummary = {
-    emailsSent: 0,
-    linkedinQueued: 0,
-    skippedDraftFailed: 0,
-    skippedNoGmailAccount: 0,
-  };
+): Promise<PrepareFollowUpsResult> {
+  const result: PrepareFollowUpsResult = { queued: [], skippedDraftFailed: 0 };
 
   const candidates = await findRecipientsNeedingFollowUp(db, now);
-  if (candidates.length === 0) return summary;
+  if (candidates.length === 0) return result;
 
   // Checked once, up front, for the same reason addRecipients checks it
   // before its per-person loop: a missing REDIRECT_BASE_URL is an
@@ -141,24 +149,7 @@ export async function sendFollowUps(
     requireRedirectBaseUrl();
   }
 
-  // One Gmail account for the whole app (same lookup as
-  // findGmailAccount in actions.ts) — resolved once, and only if an
-  // email-channel candidate actually needs it.
-  let gmailAccountId: number | null = null;
-  if (candidates.some((c) => c.channel === "email")) {
-    const account = await db.query.oauthAccount.findFirst({
-      where: (o, { eq: eqOp }) => eqOp(o.provider, "gmail"),
-      orderBy: (o, { desc }) => desc(o.createdAt),
-    });
-    gmailAccountId = account?.id ?? null;
-  }
-
   for (const recipient of candidates) {
-    if (recipient.channel === "email" && gmailAccountId === null) {
-      summary.skippedNoGmailAccount += 1;
-      continue;
-    }
-
     let draft;
     try {
       draft = await generateDraftForPerson(
@@ -171,7 +162,7 @@ export async function sendFollowUps(
         `[follow-up] draft generation failed for recipient ${recipient.id}`,
         err,
       );
-      summary.skippedDraftFailed += 1;
+      result.skippedDraftFailed += 1;
       continue;
     }
 
@@ -182,46 +173,121 @@ export async function sendFollowUps(
         )
       : draft.draft.body;
 
-    if (recipient.channel === "email") {
-      const { gmail, ownEmail } = await createGmailClient(db, gmailAccountId!);
-      const sent = await sendGmailMessage(gmail, {
-        from: ownEmail,
-        to: recipient.contactIdentifier,
-        subject: draft.draft.subject,
-        body: draftBody,
-        trackedLinkUrl: recipient.destinationUrl
-          ? buildTrackedLinkUrl(recipient.trackingToken)
-          : undefined,
-        trackingPixelUrl: recipient.destinationUrl
-          ? buildTrackingPixelUrl(recipient.trackingToken)
-          : undefined,
-      });
-      await recordSentEvent(
-        db,
-        recipient.contactId,
-        recipient.personId,
-        sent,
-        draft.draft.subject,
-        draftBody,
-      );
-      summary.emailsSent += 1;
-    } else {
-      await db
-        .update(campaignRecipient)
-        .set({
-          draftSubject: draft.draft.subject,
-          draftBody,
-          status: "drafted",
-        })
-        .where(eq(campaignRecipient.id, recipient.id));
-      summary.linkedinQueued += 1;
-    }
-
     await db
       .update(campaignRecipient)
-      .set({ followedUpAt: now })
+      .set({
+        draftSubject: draft.draft.subject,
+        draftBody,
+        status: "drafted",
+        followedUpAt: now,
+      })
       .where(eq(campaignRecipient.id, recipient.id));
+
+    result.queued.push({
+      campaignId: recipient.campaignId,
+      campaignName: recipient.campaignName,
+      personName: recipient.personName,
+      channel: recipient.channel,
+      draftSubject: draft.draft.subject,
+    });
   }
 
-  return summary;
+  return result;
+}
+
+function requireAppBaseUrl(): string {
+  const base = process.env.APP_BASE_URL;
+  if (!base) {
+    throw new Error(
+      "APP_BASE_URL must be set to link back to the app from the follow-up review email.",
+    );
+  }
+  return base.replace(/\/+$/, "");
+}
+
+// Emails the app owner's own connected Gmail account a plain digest of what
+// just got queued, grouped by channel, with a link to each campaign for
+// review — nothing here is a "send" to the actual recipient, it's a
+// notification to the one person who reviews and sends. Silently does
+// nothing if nothing was queued (no reason to email an empty digest every
+// day the job runs and finds nothing due).
+export async function notifyOwnerOfPendingFollowUps(
+  db: DrizzleDb,
+  queued: QueuedFollowUp[],
+): Promise<{ notified: boolean }> {
+  if (queued.length === 0) return { notified: false };
+
+  const account = await db.query.oauthAccount.findFirst({
+    where: (o, { eq: eqOp }) => eqOp(o.provider, "gmail"),
+    orderBy: (o, { desc }) => desc(o.createdAt),
+  });
+  if (!account) {
+    throw new Error(
+      "Can't notify you about pending follow-ups: no Gmail account is connected.",
+    );
+  }
+
+  const appBaseUrl = requireAppBaseUrl();
+  const emailRecipients = queued.filter((r) => r.channel === "email");
+  const linkedinRecipients = queued.filter((r) => r.channel === "linkedin");
+
+  const lines = [
+    `${queued.length} follow-up${queued.length === 1 ? "" : "s"} ready for review — nothing has been sent. Log in to review and send, individually or in bulk from each campaign's page.`,
+    "",
+  ];
+  if (emailRecipients.length > 0) {
+    lines.push(`Ready to send via email (${emailRecipients.length}):`);
+    for (const r of emailRecipients) {
+      lines.push(
+        `- ${r.personName} (${r.campaignName}) — "${r.draftSubject ?? "(no subject)"}" — ${appBaseUrl}/campaigns/${r.campaignId}`,
+      );
+    }
+    lines.push("");
+  }
+  if (linkedinRecipients.length > 0) {
+    lines.push(`Ready to copy-paste on LinkedIn (${linkedinRecipients.length}):`);
+    for (const r of linkedinRecipients) {
+      lines.push(
+        `- ${r.personName} (${r.campaignName}) — ${appBaseUrl}/campaigns/${r.campaignId}/linkedin-queue`,
+      );
+    }
+    lines.push("");
+  }
+
+  const { gmail, ownEmail } = await createGmailClient(db, account.id);
+  await sendGmailMessage(gmail, {
+    from: ownEmail,
+    to: ownEmail,
+    subject: `${queued.length} follow-up${queued.length === 1 ? "" : "s"} ready for review`,
+    body: lines.join("\n"),
+  });
+
+  return { notified: true };
+}
+
+export interface FollowUpCycleSummary {
+  emailQueued: number;
+  linkedinQueued: number;
+  skippedDraftFailed: number;
+  notified: boolean;
+}
+
+// The whole daily cycle: prepare today's due follow-ups, then tell the
+// owner they're ready. Split into two functions above so each is testable
+// on its own (prepareFollowUps' DB writes vs. notifyOwnerOfPendingFollowUps'
+// Gmail call), and composed here for the cron route / manual script to call
+// as one step.
+export async function runFollowUpCycle(
+  db: DrizzleDb,
+  now: Date = new Date(),
+): Promise<FollowUpCycleSummary> {
+  const { queued, skippedDraftFailed } = await prepareFollowUps(db, now);
+  const { notified } = await notifyOwnerOfPendingFollowUps(db, queued);
+
+  return {
+    emailQueued: queued.filter((r) => r.channel === "email").length,
+    linkedinQueued: queued.filter((r) => r.channel === "linkedin").length,
+    skippedDraftFailed,
+    notified,
+  };
 }

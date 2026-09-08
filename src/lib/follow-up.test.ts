@@ -6,8 +6,11 @@ import { createTestDb } from "@/db/test-utils";
 import {
   findRecipientsNeedingFollowUp,
   needsFollowUp,
-  sendFollowUps,
+  notifyOwnerOfPendingFollowUps,
+  prepareFollowUps,
+  runFollowUpCycle,
   type FollowUpEligibility,
+  type QueuedFollowUp,
 } from "./follow-up";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -137,7 +140,11 @@ describe("findRecipientsNeedingFollowUp", () => {
     const results = await findRecipientsNeedingFollowUp(testDb.db, NOW);
 
     expect(results).toHaveLength(1);
-    expect(results[0].contactIdentifier).toBe("ada@example.com");
+    expect(results[0]).toMatchObject({
+      contactIdentifier: "ada@example.com",
+      personName: "Ada",
+      campaignName: "Test",
+    });
   });
 
   it("excludes a recipient sent less than 3 days ago", async () => {
@@ -221,50 +228,23 @@ vi.mock("@/lib/gmail-send", async (importOriginal) => {
   };
 });
 
-describe("sendFollowUps", () => {
+describe("prepareFollowUps", () => {
   let testDb: Awaited<ReturnType<typeof createTestDb>>;
   const originalRedirectBaseUrl = process.env.REDIRECT_BASE_URL;
 
   beforeEach(async () => {
     testDb = await createTestDb();
     process.env.REDIRECT_BASE_URL = "https://redirect.example.com";
-    sendGmailMessageMock.mockClear();
-    createGmailClientMock.mockClear();
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (_url, options) => {
-        const body = JSON.parse(options.body);
-        return {
-          ok: true,
-          json: async () => ({
-            data: body.input.map((_t: string, index: number) => ({
-              embedding: Array(512).fill(0),
-              index,
-            })),
-          }),
-        };
-      }),
-    );
   });
 
   afterEach(async () => {
     await testDb.client.close();
-    vi.unstubAllGlobals();
     if (originalRedirectBaseUrl === undefined) {
       delete process.env.REDIRECT_BASE_URL;
     } else {
       process.env.REDIRECT_BASE_URL = originalRedirectBaseUrl;
     }
   });
-
-  async function seedGmailAccount() {
-    await testDb.db.insert(oauthAccount).values({
-      provider: "gmail",
-      emailAddress: "me@example.com",
-      accessToken: "token",
-      expiresAt: new Date(),
-    });
-  }
 
   async function seedRecipient(
     channel: "email" | "linkedin",
@@ -286,7 +266,7 @@ describe("sendFollowUps", () => {
     const [camp] = await testDb.db
       .insert(campaign)
       .values({
-        name: "Test",
+        name: "Test Campaign",
         goal: "test goal",
         destinationUrl: "https://example.com/study",
       })
@@ -308,36 +288,22 @@ describe("sendFollowUps", () => {
     return recipient;
   }
 
-  it("sends a follow-up email and marks followedUpAt", async () => {
-    await seedGmailAccount();
-    const recipient = await seedRecipient("email", "Ada");
+  it("never sends anything — only drafts and re-queues, for both channels", async () => {
+    await seedRecipient("email", "Ada");
+    await seedRecipient("linkedin", "Bob");
 
-    const summary = await sendFollowUps(testDb.db, NOW);
+    const result = await prepareFollowUps(testDb.db, NOW);
 
-    expect(summary).toMatchObject({
-      emailsSent: 1,
-      linkedinQueued: 0,
-      skippedDraftFailed: 0,
-      skippedNoGmailAccount: 0,
-    });
-    expect(sendGmailMessageMock).toHaveBeenCalledTimes(1);
-
-    const row = await testDb.db.query.campaignRecipient.findFirst({
-      where: (r, { eq }) => eq(r.id, recipient.id),
-    });
-    expect(row?.followedUpAt).toBeInstanceOf(Date);
-    // The funnel status doesn't move backward just because a nudge went
-    // out — followedUpAt is an independent fact (see schema.ts).
-    expect(row?.status).toBe("sent");
+    expect(result.queued).toHaveLength(2);
+    expect(result.skippedDraftFailed).toBe(0);
+    expect(sendGmailMessageMock).not.toHaveBeenCalled();
+    expect(createGmailClientMock).not.toHaveBeenCalled();
   });
 
-  it("re-queues a LinkedIn follow-up into the copy-assist queue instead of auto-sending", async () => {
-    const recipient = await seedRecipient("linkedin", "Bob");
+  it("writes the follow-up draft and resets status to drafted, keeping followedUpAt set", async () => {
+    const recipient = await seedRecipient("email", "Carol");
 
-    const summary = await sendFollowUps(testDb.db, NOW);
-
-    expect(summary).toMatchObject({ emailsSent: 0, linkedinQueued: 1 });
-    expect(sendGmailMessageMock).not.toHaveBeenCalled();
+    await prepareFollowUps(testDb.db, NOW);
 
     const row = await testDb.db.query.campaignRecipient.findFirst({
       where: (r, { eq }) => eq(r.id, recipient.id),
@@ -347,34 +313,182 @@ describe("sendFollowUps", () => {
     expect(row?.draftBody).toContain("Nudge for");
   });
 
-  it("skips an email recipient and leaves followedUpAt unset when no Gmail account is connected", async () => {
-    const recipient = await seedRecipient("email", "Carol");
+  it("resets a LinkedIn recipient back into the copy-assist queue", async () => {
+    const recipient = await seedRecipient("linkedin", "Dana");
 
-    const summary = await sendFollowUps(testDb.db, NOW);
+    const result = await prepareFollowUps(testDb.db, NOW);
 
-    expect(summary).toMatchObject({ emailsSent: 0, skippedNoGmailAccount: 1 });
+    expect(result.queued[0]).toMatchObject({ channel: "linkedin", personName: "Dana" });
     const row = await testDb.db.query.campaignRecipient.findFirst({
       where: (r, { eq }) => eq(r.id, recipient.id),
     });
-    expect(row?.followedUpAt).toBeNull();
+    expect(row?.status).toBe("drafted");
   });
 
   it("does nothing when there are no recipients due for a follow-up", async () => {
-    const summary = await sendFollowUps(testDb.db, NOW);
-    expect(summary).toEqual({
-      emailsSent: 0,
-      linkedinQueued: 0,
-      skippedDraftFailed: 0,
-      skippedNoGmailAccount: 0,
-    });
-    expect(createGmailClientMock).not.toHaveBeenCalled();
+    const result = await prepareFollowUps(testDb.db, NOW);
+    expect(result).toEqual({ queued: [], skippedDraftFailed: 0 });
   });
 
   it("throws a clear error when REDIRECT_BASE_URL isn't configured but a candidate needs a tracked link", async () => {
-    await seedGmailAccount();
-    await seedRecipient("email", "Dana");
+    await seedRecipient("email", "Erin");
     delete process.env.REDIRECT_BASE_URL;
 
-    await expect(sendFollowUps(testDb.db, NOW)).rejects.toThrow(/REDIRECT_BASE_URL/);
+    await expect(prepareFollowUps(testDb.db, NOW)).rejects.toThrow(/REDIRECT_BASE_URL/);
+  });
+});
+
+describe("notifyOwnerOfPendingFollowUps", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+  const originalAppBaseUrl = process.env.APP_BASE_URL;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+    process.env.APP_BASE_URL = "https://yacrm.example.com";
+    sendGmailMessageMock.mockClear();
+    createGmailClientMock.mockClear();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+    if (originalAppBaseUrl === undefined) {
+      delete process.env.APP_BASE_URL;
+    } else {
+      process.env.APP_BASE_URL = originalAppBaseUrl;
+    }
+  });
+
+  function queuedFollowUp(overrides: Partial<QueuedFollowUp>): QueuedFollowUp {
+    return {
+      campaignId: 1,
+      campaignName: "Test Campaign",
+      personName: "Ada",
+      channel: "email",
+      draftSubject: "Following up",
+      ...overrides,
+    };
+  }
+
+  it("does nothing and reports not notified when nothing was queued", async () => {
+    const result = await notifyOwnerOfPendingFollowUps(testDb.db, []);
+    expect(result).toEqual({ notified: false });
+    expect(sendGmailMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("throws when there's something to notify about but no Gmail account is connected", async () => {
+    await expect(
+      notifyOwnerOfPendingFollowUps(testDb.db, [queuedFollowUp({})]),
+    ).rejects.toThrow(/no Gmail account/i);
+  });
+
+  it("emails the owner's own Gmail account a digest grouped by channel", async () => {
+    await testDb.db.insert(oauthAccount).values({
+      provider: "gmail",
+      emailAddress: "me@example.com",
+      accessToken: "token",
+      expiresAt: new Date(),
+    });
+
+    const result = await notifyOwnerOfPendingFollowUps(testDb.db, [
+      queuedFollowUp({ personName: "Ada", channel: "email", campaignId: 5 }),
+      queuedFollowUp({ personName: "Bob", channel: "linkedin", campaignId: 5 }),
+    ]);
+
+    expect(result).toEqual({ notified: true });
+    expect(sendGmailMessageMock).toHaveBeenCalledTimes(1);
+    const params = sendGmailMessageMock.mock.calls[0][1] as {
+      from: string;
+      to: string;
+      body: string;
+    };
+    expect(params.from).toBe("me@example.com");
+    expect(params.to).toBe("me@example.com");
+    expect(params.body).toContain("Ada");
+    expect(params.body).toContain("Bob");
+    expect(params.body).toContain("https://yacrm.example.com/campaigns/5");
+    expect(params.body).toContain("nothing has been sent");
+  });
+});
+
+describe("runFollowUpCycle", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+  const originalRedirectBaseUrl = process.env.REDIRECT_BASE_URL;
+  const originalAppBaseUrl = process.env.APP_BASE_URL;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+    process.env.REDIRECT_BASE_URL = "https://redirect.example.com";
+    process.env.APP_BASE_URL = "https://yacrm.example.com";
+    sendGmailMessageMock.mockClear();
+    createGmailClientMock.mockClear();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+    if (originalRedirectBaseUrl === undefined) {
+      delete process.env.REDIRECT_BASE_URL;
+    } else {
+      process.env.REDIRECT_BASE_URL = originalRedirectBaseUrl;
+    }
+    if (originalAppBaseUrl === undefined) {
+      delete process.env.APP_BASE_URL;
+    } else {
+      process.env.APP_BASE_URL = originalAppBaseUrl;
+    }
+  });
+
+  it("prepares follow-ups and notifies the owner in one call", async () => {
+    await testDb.db.insert(oauthAccount).values({
+      provider: "gmail",
+      emailAddress: "me@example.com",
+      accessToken: "token",
+      expiresAt: new Date(),
+    });
+    const [p] = await testDb.db.insert(person).values({ name: "Ada" }).returning();
+    const [c] = await testDb.db
+      .insert(contact)
+      .values({
+        personId: p.id,
+        source: "gmail",
+        sourceIdentifier: "ada@example.com",
+        status: "active",
+      })
+      .returning();
+    const [camp] = await testDb.db
+      .insert(campaign)
+      .values({ name: "Test", goal: "goal", destinationUrl: "https://example.com/study" })
+      .returning();
+    await testDb.db.insert(campaignRecipient).values({
+      campaignId: camp.id,
+      personId: p.id,
+      contactId: c.id,
+      channel: "email",
+      status: "sent",
+      draftBody: "Original",
+      trackingToken: "tok-ada",
+      sentAt: new Date(NOW.getTime() - 4 * DAY_MS),
+    });
+
+    const summary = await runFollowUpCycle(testDb.db, NOW);
+
+    expect(summary).toEqual({
+      emailQueued: 1,
+      linkedinQueued: 0,
+      skippedDraftFailed: 0,
+      notified: true,
+    });
+    expect(sendGmailMessageMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not call Gmail at all when nothing is due", async () => {
+    const summary = await runFollowUpCycle(testDb.db, NOW);
+    expect(summary).toEqual({
+      emailQueued: 0,
+      linkedinQueued: 0,
+      skippedDraftFailed: 0,
+      notified: false,
+    });
+    expect(createGmailClientMock).not.toHaveBeenCalled();
+    expect(sendGmailMessageMock).not.toHaveBeenCalled();
   });
 });
