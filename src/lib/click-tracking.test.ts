@@ -3,10 +3,25 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { campaign, campaignRecipient, contact, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
 import {
+  appendTrackingId,
   FALLBACK_REDIRECT_PATH,
   recordClick,
   shouldRecordClick,
 } from "@/lib/click-tracking";
+
+describe("appendTrackingId", () => {
+  it("adds tracking_id as a new query param", () => {
+    expect(appendTrackingId("https://interview.example.com/study", "tok-1")).toBe(
+      "https://interview.example.com/study?tracking_id=tok-1",
+    );
+  });
+
+  it("preserves an existing query string", () => {
+    expect(
+      appendTrackingId("https://interview.example.com/study?ref=abc", "tok-1"),
+    ).toBe("https://interview.example.com/study?ref=abc&tracking_id=tok-1");
+  });
+});
 
 describe("shouldRecordClick", () => {
   it("records a click from drafted, sent, or opened", () => {
@@ -88,7 +103,7 @@ describe("recordClick", () => {
     const result = await recordClick(testDb.db, token);
 
     expect(result).toEqual({
-      redirectUrl: "https://interview.example.com/study",
+      redirectUrl: "https://interview.example.com/study?tracking_id=test-token",
       statusUpdated: true,
     });
     const row = await testDb.db.query.campaignRecipient.findFirst({
@@ -105,7 +120,9 @@ describe("recordClick", () => {
     const result = await recordClick(testDb.db, token);
 
     expect(result.statusUpdated).toBe(false);
-    expect(result.redirectUrl).toBe("https://interview.example.com/study");
+    expect(result.redirectUrl).toBe(
+      "https://interview.example.com/study?tracking_id=test-token",
+    );
     const row = await testDb.db.query.campaignRecipient.findFirst({
       where: (r, { eq }) => eq(r.trackingToken, token),
     });
@@ -118,7 +135,7 @@ describe("recordClick", () => {
     const result = await recordClick(testDb.db, token);
 
     expect(result).toEqual({
-      redirectUrl: "https://interview.example.com/study",
+      redirectUrl: "https://interview.example.com/study?tracking_id=test-token",
       statusUpdated: false,
     });
     const row = await testDb.db.query.campaignRecipient.findFirst({
