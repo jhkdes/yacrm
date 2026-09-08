@@ -71,6 +71,9 @@ export default async function CampaignDetailPage({
   for (const r of campaign.recipients) {
     funnelCounts[r.status] += 1;
   }
+  const linkedInQueueCount = campaign.recipients.filter(
+    (r) => r.channel === "linkedin" && r.status === "drafted",
+  ).length;
 
   return (
     <main style={{ padding: "2rem", fontFamily: "sans-serif" }}>
@@ -99,6 +102,13 @@ export default async function CampaignDetailPage({
           Add more people to this campaign
         </a>
       </p>
+      {linkedInQueueCount > 0 && (
+        <p>
+          <a href={`/campaigns/${campaign.id}/linkedin-queue`}>
+            LinkedIn copy-assist queue ({linkedInQueueCount} pending)
+          </a>
+        </p>
+      )}
       <form action={deleteCampaignAction}>
         <input type="hidden" name="campaignId" value={campaign.id} />
         <button type="submit">

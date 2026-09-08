@@ -6,6 +6,7 @@ import { createTestDb } from "@/db/test-utils";
 import {
   CampaignRecipientNotFoundError,
   CampaignRecipientNotSendableError,
+  markLinkedInRecipientSent,
   sendCampaignRecipientEmail,
 } from "@/lib/campaign-send";
 import type { RawEmailParams } from "@/lib/gmail-send";
@@ -166,5 +167,97 @@ describe("sendCampaignRecipientEmail", () => {
     await expect(
       sendCampaignRecipientEmail(testDb.db, 42, recipient.id),
     ).rejects.toThrow(/REDIRECT_BASE_URL/);
+  });
+});
+
+describe("markLinkedInRecipientSent", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+  });
+
+  let nextSuffix = 0;
+
+  async function seedDraftedLinkedInRecipient() {
+    nextSuffix += 1;
+    const suffix = nextSuffix;
+    const [p] = await testDb.db.insert(person).values({ name: `Ada ${suffix}` }).returning();
+    const [c] = await testDb.db.insert(contact).values({
+      personId: p.id,
+      source: "linkedin",
+      sourceIdentifier: `https://www.linkedin.com/in/ada-${suffix}`,
+      status: "active",
+    }).returning();
+    const [camp] = await testDb.db.insert(campaign).values({
+      name: "Test",
+      goal: "goal",
+      destinationUrl: "https://interview.example.com/study",
+    }).returning();
+    const [recipient] = await testDb.db.insert(campaignRecipient).values({
+      campaignId: camp.id,
+      personId: p.id,
+      contactId: c.id,
+      channel: "linkedin",
+      status: "drafted",
+      draftBody: "Hi Ada, would love for you to try this out.",
+      trackingToken: `tok-li-${suffix}`,
+    }).returning();
+    return recipient;
+  }
+
+  it("marks the recipient sent", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+
+    await markLinkedInRecipientSent(testDb.db, recipient.id);
+
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.id, recipient.id),
+    });
+    expect(row?.status).toBe("sent");
+    expect(row?.sentAt).toBeInstanceOf(Date);
+  });
+
+  it("leaves other recipients untouched", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+    const other = await seedDraftedLinkedInRecipient();
+
+    await markLinkedInRecipientSent(testDb.db, recipient.id);
+
+    const otherRow = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.id, other.id),
+    });
+    expect(otherRow?.status).toBe("drafted");
+  });
+
+  it("throws for a recipient id that doesn't exist", async () => {
+    await expect(
+      markLinkedInRecipientSent(testDb.db, 999),
+    ).rejects.toThrow(CampaignRecipientNotFoundError);
+  });
+
+  it("throws for an email-channel recipient", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+    await testDb.db
+      .update(campaignRecipient)
+      .set({ channel: "email" })
+      .where(eq(campaignRecipient.id, recipient.id));
+
+    await expect(
+      markLinkedInRecipientSent(testDb.db, recipient.id),
+    ).rejects.toThrow(CampaignRecipientNotSendableError);
+  });
+
+  it("throws for a recipient that's already sent", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+    await markLinkedInRecipientSent(testDb.db, recipient.id);
+
+    await expect(
+      markLinkedInRecipientSent(testDb.db, recipient.id),
+    ).rejects.toThrow(CampaignRecipientNotSendableError);
   });
 });

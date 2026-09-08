@@ -26,7 +26,7 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M18 | Tracked link + click capture | ✅ Done | 2 | M17 | Hitting a recipient's tracked link redirects and flips their status to `clicked` |
 | M19 | Email send wired to tracking | ✅ Done | 2 | M17, M18 | Sending a real email marks `sent`, and an open registers via the pixel |
 | M20 | Completion webhook | ✅ Done | 2 | M17 | A synthetic completion POST flips a recipient to `completed` |
-| M21 | LinkedIn copy-assist queue | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
+| M21 | LinkedIn copy-assist queue | ✅ Done | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
 | M22 | Campaign dashboard + CSV export | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
 | M23 | 3-day follow-up job | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
 | M24 | Calendar read + meeting import | 4 | — | Calendar events land as `meeting` rows with attendees linked |
@@ -202,13 +202,15 @@ The original plan assumed a generic "shared secret header" and a tracking token 
 
 Manually verified twice: first with a synthetic completion payload against live Supabase (seeded a `clicked` recipient, hit the deployed `apps/redirect` click route, confirmed `tracking_id` was appended to the redirect, then POSTed a synthetic payload to the deployed webhook — wrong secret → 404, correct secret → 200 and the DB row flipped to `completed`). Then confirmed for real: a live campaign send → real click-through with `tracking_id` attached → an actual completed interview → the AI-interview tool's own webhook call flipped the real recipient to `completed` with no manual intervention. One deploy-config gotcha hit along the way, worth remembering: adding `INTERVIEW_WEBHOOK_SECRET` to Vercel's dashboard didn't take effect on the already-running deployment — it only applied after an explicit redeploy of `apps/redirect`. Vercel env var changes need a fresh deployment to actually be picked up, not just a save in the dashboard.
 
-### M21 — LinkedIn copy-assist queue
+### M21 — LinkedIn copy-assist queue ✅
 
-**New page** `src/app/campaigns/[id]/linkedin-queue/page.tsx`: lists this campaign's `channel: "linkedin"` recipients with `status: "drafted"`, showing each draft with a copy-to-clipboard button and the recipient's LinkedIn profile URL (opens in a new tab). A "Mark sent" Server Action (`markLinkedinRecipientSentAction` in `actions.ts`) sets `status: "sent"`, `sentAt: now` — no pixel, no email; `openedAt` never populates for LinkedIn recipients by design (per the roadmap's funnel table).
+**Shipped as**:
+- `markLinkedInRecipientSent(db, recipientId)` — added to `src/lib/campaign-send.ts` alongside `sendCampaignRecipientEmail`, reusing its `CampaignRecipientNotFoundError`/`CampaignRecipientNotSendableError` (same shape of guard: must be `channel: "linkedin"` and `status: "drafted"`). No pixel, no draft-generation, no `event` recorded — unlike an email send, there's no Gmail API call happening at all, so there's no message id or content this app actually sent to attach to the Person's timeline; it just trusts the user that they sent it and records the funnel transition.
+- `src/app/campaigns/[id]/linkedin-queue/page.tsx` — lists that campaign's LinkedIn/`drafted` recipients, each with their profile link (opens in a new tab), the draft body, a **Copy message** button, and a **Mark sent** button (`markLinkedinRecipientSentAction`).
+- `CopyButton.tsx` — this app's first (and, deliberately, only) Client Component. Everything else is server components + form posts; clipboard access has no server-side equivalent, so this one small, isolated exception was unavoidable rather than a stylistic drift.
+- The campaign detail page links to the queue whenever it has any LinkedIn/`drafted` recipients, showing the pending count.
 
-**Test plan**:
-- Integration (pglite): `markLinkedinRecipientSentAction` flips exactly the targeted recipient, leaves others untouched.
-- Manual: walk the queue for a real small campaign, confirm the copy button and profile links work.
+**Test plan** (as built): `campaign-send.test.ts` extended with `markLinkedInRecipientSent` cases — marks sent, leaves other recipients untouched, not-found, wrong-channel, already-sent. No unit test for `CopyButton` (trivial, browser-API-only, not worth a DOM-testing setup for one `navigator.clipboard.writeText` call) — verified manually instead: walked a real queue, confirmed the copy button and profile links work.
 
 ### M22 — Campaign dashboard + CSV export
 
