@@ -7,6 +7,7 @@ import {
   sendCampaignRecipientAction,
 } from "@/app/actions";
 import { db } from "@/db/client";
+import { summarizeCampaign, type CampaignRecipientRow } from "@/lib/campaign-reporting";
 
 // Once apps/redirect is deployed, set REDIRECT_BASE_URL (e.g.
 // "https://yacrm-redirect.vercel.app") so links shown here — and, later,
@@ -61,16 +62,20 @@ export default async function CampaignDetailPage({
     notFound();
   }
 
-  const funnelCounts = {
-    drafted: 0,
-    sent: 0,
-    opened: 0,
-    clicked: 0,
-    completed: 0,
-  };
-  for (const r of campaign.recipients) {
-    funnelCounts[r.status] += 1;
-  }
+  const reportingRows: CampaignRecipientRow[] = campaign.recipients.map((r) => ({
+    personName: r.person.name,
+    contactIdentifier: r.contact.sourceIdentifier,
+    channel: r.channel,
+    status: r.status,
+    draftSubject: r.draftSubject,
+    draftBody: r.draftBody,
+    trackingToken: r.trackingToken,
+    sentAt: r.sentAt,
+    openedAt: r.openedAt,
+    clickedAt: r.clickedAt,
+    completedAt: r.completedAt,
+  }));
+  const funnel = summarizeCampaign(reportingRows);
   const linkedInQueueCount = campaign.recipients.filter(
     (r) => r.channel === "linkedin" && r.status === "drafted",
   ).length;
@@ -161,13 +166,47 @@ export default async function CampaignDetailPage({
       )}
 
       <h2>Funnel</h2>
-      <ul>
-        <li>Drafted: {funnelCounts.drafted}</li>
-        <li>Sent: {funnelCounts.sent}</li>
-        <li>Opened: {funnelCounts.opened}</li>
-        <li>Clicked: {funnelCounts.clicked}</li>
-        <li>Completed: {funnelCounts.completed}</li>
-      </ul>
+      <table style={{ borderCollapse: "collapse" }}>
+        <thead>
+          <tr>
+            <th style={{ textAlign: "left", padding: "0.25rem 1rem 0.25rem 0" }}>
+              Channel
+            </th>
+            <th style={{ textAlign: "right", padding: "0.25rem 1rem" }}>Drafted</th>
+            <th style={{ textAlign: "right", padding: "0.25rem 1rem" }}>Sent</th>
+            <th style={{ textAlign: "right", padding: "0.25rem 1rem" }}>Opened</th>
+            <th style={{ textAlign: "right", padding: "0.25rem 1rem" }}>Clicked</th>
+            <th style={{ textAlign: "right", padding: "0.25rem 1rem" }}>Completed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(["email", "linkedin"] as const).map((channel) => (
+            <tr key={channel}>
+              <td style={{ padding: "0.25rem 1rem 0.25rem 0" }}>{channel}</td>
+              <td style={{ textAlign: "right", padding: "0.25rem 1rem" }}>
+                {funnel[channel].drafted}
+              </td>
+              <td style={{ textAlign: "right", padding: "0.25rem 1rem" }}>
+                {funnel[channel].sent}
+              </td>
+              <td style={{ textAlign: "right", padding: "0.25rem 1rem" }}>
+                {funnel[channel].opened}
+              </td>
+              <td style={{ textAlign: "right", padding: "0.25rem 1rem" }}>
+                {funnel[channel].clicked}
+              </td>
+              <td style={{ textAlign: "right", padding: "0.25rem 1rem" }}>
+                {funnel[channel].completed}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p>
+        <a href={`/api/campaigns/${campaign.id}/export`}>
+          Export recipients as CSV
+        </a>
+      </p>
 
       <h2>Recipients ({campaign.recipients.length})</h2>
       {campaign.recipients.length === 0 ? (
