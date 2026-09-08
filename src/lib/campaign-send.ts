@@ -76,6 +76,51 @@ export async function sendCampaignRecipientEmail(
     .where(eq(campaignRecipient.id, recipientId));
 }
 
+export interface SendAllDraftedResult {
+  sent: number;
+  failed: number;
+}
+
+// Bulk version of sendCampaignRecipientEmail — every email-channel,
+// still-drafted recipient of one Campaign, sent one at a time. Always an
+// explicit, logged-in action the owner triggers themselves (never called
+// from the follow-up cron job — see docs/technical-design-and-milestones.md's
+// M23 note: nothing goes out automatically, review always comes first).
+// One recipient's send failing (a transient Gmail error, say) doesn't stop
+// the rest — every recipient gets its own attempt, and the caller sees how
+// many of each.
+export async function sendAllDraftedCampaignEmails(
+  db: DrizzleDb,
+  accountId: number,
+  campaignId: number,
+): Promise<SendAllDraftedResult> {
+  const recipients = await db.query.campaignRecipient.findMany({
+    where: (r, { and, eq: eqOp, isNull }) =>
+      and(
+        eqOp(r.campaignId, campaignId),
+        eqOp(r.channel, "email"),
+        eqOp(r.status, "drafted"),
+        isNull(r.deletedAt),
+      ),
+  });
+
+  const result: SendAllDraftedResult = { sent: 0, failed: 0 };
+  for (const recipient of recipients) {
+    try {
+      await sendCampaignRecipientEmail(db, accountId, recipient.id);
+      result.sent += 1;
+    } catch (err) {
+      console.warn(
+        `[campaign-send] bulk send failed for recipient ${recipient.id}`,
+        err,
+      );
+      result.failed += 1;
+    }
+  }
+
+  return result;
+}
+
 // M21's LinkedIn "send": there's no API to actually deliver the message
 // (see docs/outreach-roadmap.md's decision to stay within LinkedIn's terms
 // of service — this app never automates a LinkedIn send), so this just

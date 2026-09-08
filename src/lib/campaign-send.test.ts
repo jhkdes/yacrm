@@ -7,6 +7,7 @@ import {
   CampaignRecipientNotFoundError,
   CampaignRecipientNotSendableError,
   markLinkedInRecipientSent,
+  sendAllDraftedCampaignEmails,
   sendCampaignRecipientEmail,
 } from "@/lib/campaign-send";
 import type { RawEmailParams } from "@/lib/gmail-send";
@@ -167,6 +168,148 @@ describe("sendCampaignRecipientEmail", () => {
     await expect(
       sendCampaignRecipientEmail(testDb.db, 42, recipient.id),
     ).rejects.toThrow(/REDIRECT_BASE_URL/);
+  });
+});
+
+describe("sendAllDraftedCampaignEmails", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+  const originalRedirectBaseUrl = process.env.REDIRECT_BASE_URL;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+    process.env.REDIRECT_BASE_URL = "https://redirect.example.com";
+    sendGmailMessageMock.mockClear();
+    createGmailClientMock.mockClear();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (_url, options) => {
+        const body = JSON.parse(options.body);
+        return {
+          ok: true,
+          json: async () => ({
+            data: body.input.map((_t: string, index: number) => ({
+              embedding: Array(512).fill(0),
+              index,
+            })),
+          }),
+        };
+      }),
+    );
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+    vi.unstubAllGlobals();
+    if (originalRedirectBaseUrl === undefined) {
+      delete process.env.REDIRECT_BASE_URL;
+    } else {
+      process.env.REDIRECT_BASE_URL = originalRedirectBaseUrl;
+    }
+  });
+
+  async function seedCampaign() {
+    const [camp] = await testDb.db
+      .insert(campaign)
+      .values({
+        name: "Test",
+        goal: "goal",
+        destinationUrl: "https://interview.example.com/study",
+      })
+      .returning();
+    return camp;
+  }
+
+  async function seedDraftedRecipientIn(
+    campaignId: number,
+    personName: string,
+    overrides: { channel?: "email" | "linkedin"; status?: "drafted" | "sent" } = {},
+  ) {
+    const [p] = await testDb.db.insert(person).values({ name: personName }).returning();
+    const [c] = await testDb.db
+      .insert(contact)
+      .values({
+        personId: p.id,
+        source: overrides.channel === "linkedin" ? "linkedin" : "gmail",
+        sourceIdentifier:
+          overrides.channel === "linkedin"
+            ? `https://www.linkedin.com/in/${personName.toLowerCase()}`
+            : `${personName.toLowerCase()}@example.com`,
+        status: "active",
+      })
+      .returning();
+    const [recipient] = await testDb.db
+      .insert(campaignRecipient)
+      .values({
+        campaignId,
+        personId: p.id,
+        contactId: c.id,
+        channel: overrides.channel ?? "email",
+        status: overrides.status ?? "drafted",
+        draftSubject: "Subject",
+        draftBody: `Hi ${personName}.`,
+        trackingToken: `tok-${p.id}`,
+      })
+      .returning();
+    return recipient;
+  }
+
+  it("sends every drafted email recipient in the campaign", async () => {
+    const camp = await seedCampaign();
+    await seedDraftedRecipientIn(camp.id, "Ada");
+    await seedDraftedRecipientIn(camp.id, "Bob");
+
+    const result = await sendAllDraftedCampaignEmails(testDb.db, 42, camp.id);
+
+    expect(result).toEqual({ sent: 2, failed: 0 });
+    expect(sendGmailMessageMock).toHaveBeenCalledTimes(2);
+
+    const rows = await testDb.db.select().from(campaignRecipient);
+    expect(rows.every((r) => r.status === "sent")).toBe(true);
+  });
+
+  it("skips a linkedin-channel recipient — bulk send is email-only", async () => {
+    const camp = await seedCampaign();
+    await seedDraftedRecipientIn(camp.id, "Carol", { channel: "linkedin" });
+
+    const result = await sendAllDraftedCampaignEmails(testDb.db, 42, camp.id);
+
+    expect(result).toEqual({ sent: 0, failed: 0 });
+    expect(sendGmailMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("skips an already-sent recipient", async () => {
+    const camp = await seedCampaign();
+    await seedDraftedRecipientIn(camp.id, "Dana", { status: "sent" });
+
+    const result = await sendAllDraftedCampaignEmails(testDb.db, 42, camp.id);
+
+    expect(result).toEqual({ sent: 0, failed: 0 });
+  });
+
+  it("keeps going after one recipient fails, and reports the failure", async () => {
+    const camp = await seedCampaign();
+    await seedDraftedRecipientIn(camp.id, "Erin");
+    await seedDraftedRecipientIn(camp.id, "Frank");
+
+    sendGmailMessageMock
+      .mockImplementationOnce(async () => {
+        throw new Error("Gmail API blew up");
+      })
+      .mockImplementationOnce(async () => ({
+        messageId: "sent-ok",
+        threadId: "thread-ok",
+      }));
+
+    const result = await sendAllDraftedCampaignEmails(testDb.db, 42, camp.id);
+
+    expect(result).toEqual({ sent: 1, failed: 1 });
+  });
+
+  it("does nothing for a campaign with no drafted email recipients", async () => {
+    const camp = await seedCampaign();
+    const result = await sendAllDraftedCampaignEmails(testDb.db, 42, camp.id);
+    expect(result).toEqual({ sent: 0, failed: 0 });
+    expect(createGmailClientMock).not.toHaveBeenCalled();
   });
 });
 

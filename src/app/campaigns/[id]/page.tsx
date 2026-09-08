@@ -4,6 +4,7 @@ import {
   deleteCampaignAction,
   removeCampaignRecipientAction,
   restoreCampaignRecipientAction,
+  sendAllCampaignRecipientsAction,
   sendCampaignRecipientAction,
 } from "@/app/actions";
 import { db } from "@/db/client";
@@ -38,6 +39,8 @@ export default async function CampaignDetailPage({
     restored?: string;
     campaign_restored?: string;
     sent_recipient?: string;
+    sent_all?: string;
+    sent_all_failed?: string;
     error?: string;
   }>;
 }) {
@@ -78,6 +81,9 @@ export default async function CampaignDetailPage({
   const funnel = summarizeCampaign(reportingRows);
   const linkedInQueueCount = campaign.recipients.filter(
     (r) => r.channel === "linkedin" && r.status === "drafted",
+  ).length;
+  const draftedEmailCount = campaign.recipients.filter(
+    (r) => r.channel === "email" && r.status === "drafted",
   ).length;
 
   return (
@@ -164,6 +170,13 @@ export default async function CampaignDetailPage({
       {query.sent_recipient && (
         <p style={{ color: "green" }}>Sent.</p>
       )}
+      {query.sent_all && (
+        <p style={{ color: "green" }}>
+          Sent {query.sent_all} email{query.sent_all === "1" ? "" : "s"}.
+          {Number(query.sent_all_failed) > 0 &&
+            ` ${query.sent_all_failed} failed to send — see server logs.`}
+        </p>
+      )}
 
       <h2>Funnel</h2>
       <table style={{ borderCollapse: "collapse" }}>
@@ -209,6 +222,14 @@ export default async function CampaignDetailPage({
       </p>
 
       <h2>Recipients ({campaign.recipients.length})</h2>
+      {draftedEmailCount > 0 && (
+        <form action={sendAllCampaignRecipientsAction} style={{ marginBottom: "1rem" }}>
+          <input type="hidden" name="campaignId" value={campaign.id} />
+          <button type="submit">
+            Send all drafted emails ({draftedEmailCount})
+          </button>
+        </form>
+      )}
       {campaign.recipients.length === 0 ? (
         <p>No recipients yet.</p>
       ) : (

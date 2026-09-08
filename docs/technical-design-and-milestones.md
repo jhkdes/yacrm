@@ -27,8 +27,8 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M19 | Email send wired to tracking | ✅ Done | 2 | M17, M18 | Sending a real email marks `sent`, and an open registers via the pixel |
 | M20 | Completion webhook | ✅ Done | 2 | M17 | A synthetic completion POST flips a recipient to `completed` |
 | M21 | LinkedIn copy-assist queue | ✅ Done | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
-| M22 | Campaign dashboard + CSV export | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
-| M23 | 3-day follow-up job | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
+| M22 | Campaign dashboard + CSV export | ✅ Done | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
+| M23 | 3-day follow-up job | ✅ Done | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
 | M24 | Calendar read + meeting import | 4 | — | Calendar events land as `meeting` rows with attendees linked |
 | M25 | Attendee-to-contact matching | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
 | M26 | Last-touched staleness view | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
@@ -241,6 +241,18 @@ Manually verified twice: first with a synthetic completion payload against live 
 - Unit: `needsFollowUp` against fixtures for every status × age combination — this is the core logic and it's fully pure, so it's the cheapest and most important test in this milestone.
 - Integration (pglite): `findRecipientsNeedingFollowUp` against seeded rows with controlled `sentAt`/`status`/`followedUpAt` values.
 - Manual: `scripts/run-follow-ups.ts` invoking `sendFollowUps` directly against real data once ready to trust it unattended; only wire the actual cron trigger after that's been eyeballed at least once.
+
+**Shipped as** `src/lib/follow-up.ts`, `src/app/api/cron/follow-ups/route.ts`, `scripts/run-follow-ups.ts`.
+
+**Deviation from the plan above — nothing is ever sent automatically.** After the plan above was implemented once (auto-sending email follow-ups directly via Gmail), the owner made the call that they want to personally review every outbound message — follow-ups included — before it leaves, the same as every other send in this app. `sendFollowUps` was reworked into two smaller pieces instead of one that sends:
+
+- `prepareFollowUps(db, now)` — **full-pipeline, but never sends**. For every recipient due for a nudge (either channel), drafts the follow-up and writes it into `draftSubject`/`draftBody`, resets `status` back to `"drafted"`, and sets `followedUpAt: now`. This puts the recipient in front of the *existing* per-recipient "Send" button (email) or the M21 copy-assist queue (linkedin) exactly like a fresh, never-sent draft — there's no separate "pending follow-up" state to build. `status` being reset to `"drafted"` here is a deliberate, one-time exception to the rule that `followedUpAt` is independent of `status` (see the column comment in `schema.ts`): the whole point of this milestone is to get the draft back in front of the owner, and `"drafted"` is what makes it show up for review/send.
+- `notifyOwnerOfPendingFollowUps(db, queued)` — emails the owner's own connected Gmail account (from and to are both `ownEmail` — this is a self-notification, not outreach) a plain-text digest of what just got queued, grouped by channel, with a link to each campaign for review. Does nothing if nothing was queued (no daily empty-digest spam).
+- `runFollowUpCycle(db, now)` — composes the two for the cron route / manual script: prepare, then notify.
+
+New `sendAllDraftedCampaignEmails(db, accountId, campaignId)` in `src/lib/campaign-send.ts` — the bulk counterpart to the existing per-recipient `sendCampaignRecipientEmail`, wired to a new "Send all drafted emails (N)" button on the campaign detail page (`sendAllCampaignRecipientsAction`) — so a day's worth of queued follow-ups (or a fresh batch of first-time drafts) can be reviewed once and sent in bulk instead of one click per recipient. Email-only; LinkedIn sending stays manual by design, walked one at a time through the M21 copy-assist queue.
+
+New env vars: `FOLLOW_UP_CRON_SECRET`, checked as a Bearer header on `POST /api/cron/follow-ups` (unlike the M18/M19/M20 tracking routes, this route is excluded from `src/proxy.ts`'s access gate — it's the real production entry point an external scheduler hits with no browser session, not a local-testing fallback — and relies on its own fail-closed secret check instead); `APP_BASE_URL`, this app's own public URL, used to build the campaign links inside the review digest email.
 
 ---
 
