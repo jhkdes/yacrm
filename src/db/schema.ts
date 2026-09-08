@@ -17,6 +17,9 @@ export const sourceEnum = pgEnum("source", [
   "hotmail",
   "linkedin",
   "sms",
+  // M25: a calendar attendee with no existing Contact match becomes one
+  // sourced here (identifier = their email) — see calendar-import.ts.
+  "google_calendar",
 ]);
 
 export const eventDirectionEnum = pgEnum("event_direction", [
@@ -292,6 +295,63 @@ export const campaignRecipientRelations = relations(
     }),
     contact: one(contact, {
       fields: [campaignRecipient.contactId],
+      references: [contact.id],
+    }),
+  }),
+);
+
+// M24: a calendar event with at least one non-owner attendee. Keyed on
+// googleEventId so re-importing (a periodic sync, or the same date range
+// run twice) updates the same row instead of duplicating it.
+export const meeting = pgTable(
+  "meeting",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    googleEventId: text("google_event_id").notNull(),
+    title: text("title"),
+    startTime: timestamp("start_time", { withTimezone: true }).notNull(),
+    endTime: timestamp("end_time", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [unique().on(table.googleEventId)],
+);
+
+// One row per (meeting, contact) — a meeting's non-owner attendees, each
+// resolved to a Contact (M24: only an existing one; M25: creates one for an
+// unmatched attendee, same as any other source). No onDelete on contactId:
+// a Contact should never be silently deleted out from under a meeting
+// record the way a Campaign Recipient can (see campaign.deletedAt) — there
+// is currently no Contact-delete path at all, only person-merge, which
+// reassigns rather than removes.
+export const meetingAttendee = pgTable(
+  "meeting_attendee",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    meetingId: integer("meeting_id")
+      .notNull()
+      .references(() => meeting.id, { onDelete: "cascade" }),
+    contactId: integer("contact_id")
+      .notNull()
+      .references(() => contact.id),
+  },
+  (table) => [unique().on(table.meetingId, table.contactId)],
+);
+
+export const meetingRelations = relations(meeting, ({ many }) => ({
+  attendees: many(meetingAttendee),
+}));
+
+export const meetingAttendeeRelations = relations(
+  meetingAttendee,
+  ({ one }) => ({
+    meeting: one(meeting, {
+      fields: [meetingAttendee.meetingId],
+      references: [meeting.id],
+    }),
+    contact: one(contact, {
+      fields: [meetingAttendee.contactId],
       references: [contact.id],
     }),
   }),

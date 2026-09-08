@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 import { contact, event, person } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
@@ -87,6 +87,28 @@ export async function findOrCreateContact(
     wasCreated: true,
     wasPromoted: false,
   };
+}
+
+// M24: looks up an existing Contact by email only — no creation, unlike
+// findOrCreateContact. Restricted to the two email-shaped sources (gmail,
+// hotmail); sms's identifier is a phone number and linkedin's is a profile
+// URL, so neither could ever collide with an email anyway, but being
+// explicit here is cheap and correct rather than relying on that being
+// true by accident. Used by calendar-import.ts to match a meeting attendee
+// to a Contact that already exists — an unmatched attendee is M25's job
+// (findOrCreateContact with source "google_calendar"), not this one's.
+export async function findContactByEmail(
+  db: DrizzleDb,
+  email: string,
+): Promise<{ contactId: number; personId: number } | undefined> {
+  const existing = await db.query.contact.findFirst({
+    where: and(
+      inArray(contact.source, ["gmail", "hotmail"]),
+      eq(contact.sourceIdentifier, email.trim().toLowerCase()),
+    ),
+  });
+  if (!existing) return undefined;
+  return { contactId: existing.id, personId: existing.personId };
 }
 
 // Two-way detection for a single import batch can't see across batches: an
