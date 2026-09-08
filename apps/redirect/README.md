@@ -17,13 +17,26 @@ regardless of whether the token was recognized (a broken-image icon in the
 recipient's inbox is a worse signal to leak than silently doing nothing),
 and advances the recipient's status `sent` → `opened` if appropriate.
 
+`POST /webhooks/interview-complete/<secret>` is the completion-tracking
+counterpart (M20) — the AI-interview tool calls this when a tagged
+interview (one visited via a `/<token>` link, which tags the destination
+URL with `?tracking_id=<token>`) completes. There's no signature on the
+payload; the `<secret>` path segment (checked against
+`INTERVIEW_WEBHOOK_SECRET`) is the only thing standing in for auth, per
+the tool's own integration contract — a wrong/missing secret gets a 404.
+Sets the matching recipient's status to `completed` unconditionally
+(regardless of their current funnel status), since a completion event is
+an objective fact the tool is reporting, not something to second-guess.
+
 It shares the main app's database — see [`../../src/db/schema.ts`](../../src/db/schema.ts)
 for the real schema; the query logic here (`src/click-tracking.ts`,
-`src/open-tracking.ts`) is deliberately small, hand-duplicated raw-SQL
-copies of [`../../src/lib/click-tracking.ts`](../../src/lib/click-tracking.ts)
-and [`../../src/lib/open-tracking.ts`](../../src/lib/open-tracking.ts), not
-a shared package — see the comment at the top of `click-tracking.ts` for
-why.
+`src/open-tracking.ts`, `src/interview-webhook.ts`) is deliberately small,
+hand-duplicated raw-SQL copies of
+[`../../src/lib/click-tracking.ts`](../../src/lib/click-tracking.ts),
+[`../../src/lib/open-tracking.ts`](../../src/lib/open-tracking.ts), and
+[`../../src/lib/interview-webhook.ts`](../../src/lib/interview-webhook.ts),
+not a shared package — see the comment at the top of `click-tracking.ts`
+for why.
 
 ## Local development
 
@@ -41,10 +54,14 @@ app's migrations against that database first).
 
 1. Create a new Vercel project from this same GitHub repo, with **Root
    Directory** set to `apps/redirect`.
-2. Set the `DATABASE_URL` environment variable on that Vercel project to
-   the same hosted Postgres connection string the main app uses.
+2. Set the `DATABASE_URL` and `INTERVIEW_WEBHOOK_SECRET` environment
+   variables on that Vercel project — the latter to the same hosted
+   Postgres connection string and secret the main app uses.
 3. Deploy, then attach whichever domain/subdomain you want recipients'
    links to use.
 4. Point the main app's own `DATABASE_URL` at the same database too (see
    the main repo's `.env.local.example`) — this app and the main app need
    to see the same rows for click tracking to actually work end to end.
+5. Give the AI-interview tool's operator this app's domain +
+   `/webhooks/interview-complete/<INTERVIEW_WEBHOOK_SECRET>` to configure
+   as their `PARTICIPANT_COMPLETION_WEBHOOK_URL`.

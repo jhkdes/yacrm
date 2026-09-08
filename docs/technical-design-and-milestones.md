@@ -25,7 +25,7 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M17 | Campaign & recipient schema, incl. campaign/recipient management + undo | ✅ Done | 2 | — | A campaign persists; ranking/drafting write real rows instead of vanishing on refresh; adding/removing people and deleting a campaign are all reversible immediately after the action |
 | M18 | Tracked link + click capture | ✅ Done | 2 | M17 | Hitting a recipient's tracked link redirects and flips their status to `clicked` |
 | M19 | Email send wired to tracking | ✅ Done | 2 | M17, M18 | Sending a real email marks `sent`, and an open registers via the pixel |
-| M20 | Completion webhook | 2 | M17 | A synthetic completion POST flips a recipient to `completed` |
+| M20 | Completion webhook | ✅ Done | 2 | M17 | A synthetic completion POST flips a recipient to `completed` |
 | M21 | LinkedIn copy-assist queue | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
 | M22 | Campaign dashboard + CSV export | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
 | M23 | 3-day follow-up job | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
@@ -186,15 +186,19 @@ export const campaignRecipient = pgTable(
 
 **Related incident, surfaced by actually deploying for this milestone's testing**: reconsidering "should the main app also deploy" (to make manual testing easier) led to briefly deploying it publicly with no authentication at all — Vercel Authentication's free Hobby tier explicitly excludes a project's production custom domain from protection, only preview/deployment URLs, which isn't obvious until you check. The gap was live for a period with real Gmail access exposed. Fixed with an app-level password gate (`src/proxy.ts`, `src/lib/access-gate.ts`, `/login`) that doesn't depend on Vercel's own protection at all. Documented here because it's the direct reason `REDIRECT_BASE_URL` — not the main app's own domain — is the only correct place for a real send's tracked link/pixel to point.
 
-### M20 — Completion webhook
+### M20 — Completion webhook ✅
 
-**New route handler** `src/app/api/webhooks/interview-complete/route.ts`:
-- `POST`, body includes the tracking token (passed through the M18 redirect as a query param, echoed back by the interview tool's webhook payload). Looks up the recipient, sets `status: "completed"`, `completedAt: now`, regardless of current status (completion is terminal and should win over any funnel state).
-- Protected by a shared secret header, since this is a public endpoint the interview tool calls.
+The original plan assumed a generic "shared secret header" and a tracking token we'd invent our own passthrough mechanism for. Once the actual interview tool's integration contract was provided, both assumptions turned out to be slightly off — implemented against the real spec instead:
 
-**Test plan**:
-- Integration: `POST` with a valid token + secret flips status to `completed`; missing/wrong secret returns 401 and makes no DB change; unknown token returns 404.
-- Manual: only fully verifiable once the real interview tool's webhook shape is known — flagged as a dependency, not a blocker (contract can be stubbed and swapped).
+- **Auth is a secret URL segment, not a header.** The tool's webhook has no signature scheme at all — their own guidance is "treat the URL itself as the shared secret." So the route is `/webhooks/interview-complete/[secret]` (both apps), checked against `INTERVIEW_WEBHOOK_SECRET`; a wrong/missing secret gets a 404 (not 401 — no reason to confirm the route exists to a guesser).
+- **The passthrough mechanism is a `tracking_id` query param on the destination link**, not something invented locally — their platform only calls the webhook for interviews visited via a tagged link, and echoes that exact value back in the payload as `participantTrackingId`. This meant M18's click redirect needed a small retroactive change: `appendTrackingId(destinationUrl, token)` (`click-tracking.ts`, both apps) now tags every redirect with `?tracking_id=<trackingToken>` — reusing the same token already used for click correlation, no new field needed.
+
+**Shipped as**:
+- `src/lib/interview-webhook.ts` — `isValidCompletionPayload` (**pure**: validates `{participantTrackingId, interviewId, studyId, status, completedAt}` all present and correctly typed) and `recordCompletion` (**DB-only**: sets `status: "completed"` using the *tool's own* `completedAt` timestamp, not our receipt time; unconditional on prior funnel status, since completion is an objective fact the tool is reporting, not something to validate against our own state; a non-`"completed"` `status` value or an unmatched `participantTrackingId` is a no-op, not an error — matches their spec that any non-5xx response means "don't retry").
+- Route handlers in both apps, same split as M18/M19: the main app's copy is a local-testing fallback (behind the access gate — a local curl test needs the gate cookie included), `apps/redirect`'s copy is the real endpoint given to the tool's operator.
+- Malformed JSON or a payload missing required fields returns 400 (their spec treats 4xx as non-retryable, which is correct here — retrying a malformed request never helps).
+
+**Test plan** (as built): `interview-webhook.test.ts` — pure validator cases (missing field, wrong type, empty tracking id, non-object input) and pglite-backed `recordCompletion` integration tests (normal completion using their timestamp, completing from every funnel status including `drafted`, unparseable `completedAt` falling back to now, unmatched token, non-`"completed"` status). `click-tracking.test.ts` extended for `appendTrackingId` (new param, and preserving an existing query string). Manually verified end to end against live Supabase: seeded a `clicked` recipient, hit the deployed `apps/redirect` click route and confirmed `tracking_id` was appended to the redirect, then POSTed a synthetic completion payload to the deployed webhook (wrong secret → 404, correct secret → 200 and the real DB row flipped to `completed` with the payload's own timestamp).
 
 ### M21 — LinkedIn copy-assist queue
 

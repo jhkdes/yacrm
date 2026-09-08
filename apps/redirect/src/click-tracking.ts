@@ -33,6 +33,17 @@ interface RecipientRow {
   destination_url: string | null;
 }
 
+// Tags the destination with our tracking token as a `tracking_id` query
+// param — the AI-interview tool's webhook contract (M20) echoes this back
+// verbatim on completion, and it's how a completion event gets matched
+// back to this recipient. A link visited without this param never
+// triggers their webhook at all, per their spec.
+export function appendTrackingId(destinationUrl: string, token: string): string {
+  const url = new URL(destinationUrl);
+  url.searchParams.set("tracking_id", token);
+  return url.toString();
+}
+
 // Looks up the recipient by their tracking token, advances their status if
 // shouldRecordClick says to, and returns where to send them. Never throws
 // on a bad/unknown token or a campaign with no destination_url — both just
@@ -56,8 +67,10 @@ export async function recordClick(
     return { redirectUrl: fallbackUrl, statusUpdated: false };
   }
 
+  const redirectUrl = appendTrackingId(recipient.destination_url, token);
+
   if (!shouldRecordClick(recipient.status)) {
-    return { redirectUrl: recipient.destination_url, statusUpdated: false };
+    return { redirectUrl, statusUpdated: false };
   }
 
   await pool.query(
@@ -65,5 +78,5 @@ export async function recordClick(
     [recipient.id],
   );
 
-  return { redirectUrl: recipient.destination_url, statusUpdated: true };
+  return { redirectUrl, statusUpdated: true };
 }

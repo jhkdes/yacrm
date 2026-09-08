@@ -28,6 +28,19 @@ export interface ClickResolution {
   statusUpdated: boolean;
 }
 
+// Pure: tags the destination with our tracking token as a `tracking_id`
+// query param — the AI-interview tool's own webhook contract (M20, see
+// docs/technical-design-and-milestones.md) echoes this back verbatim on
+// completion, and it's how a completion event gets matched back to this
+// specific recipient. An interview link visited without this param never
+// triggers their webhook at all, per their spec — so this is required, not
+// optional, for completion tracking to work.
+export function appendTrackingId(destinationUrl: string, token: string): string {
+  const url = new URL(destinationUrl);
+  url.searchParams.set("tracking_id", token);
+  return url.toString();
+}
+
 // DB-only: looks up the recipient by their tracking token, advances their
 // status if shouldRecordClick says to, and returns where to send them.
 // Never throws on a bad/unknown token — that's just treated as "redirect to
@@ -45,8 +58,10 @@ export async function recordClick(
     return { redirectUrl: FALLBACK_REDIRECT_PATH, statusUpdated: false };
   }
 
+  const redirectUrl = appendTrackingId(recipient.campaign.destinationUrl, token);
+
   if (!shouldRecordClick(recipient.status)) {
-    return { redirectUrl: recipient.campaign.destinationUrl, statusUpdated: false };
+    return { redirectUrl, statusUpdated: false };
   }
 
   await db
@@ -54,5 +69,5 @@ export async function recordClick(
     .set({ status: "clicked", clickedAt: new Date() })
     .where(eq(campaignRecipient.id, recipient.id));
 
-  return { redirectUrl: recipient.campaign.destinationUrl, statusUpdated: true };
+  return { redirectUrl, statusUpdated: true };
 }
