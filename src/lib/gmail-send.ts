@@ -52,14 +52,19 @@ export interface RawEmailParams {
   from: string;
   to: string;
   subject: string;
+  // Expected to already contain the real tracked link inline, verbatim,
+  // wherever it belongs — see fillLinkPlaceholder in draft-generation.ts,
+  // which is what puts it there when the recipient's draft is created.
+  // This function never appends a link on its own; a body with no link in
+  // it just sends with no link, same as any other plain outreach message.
   body: string;
-  // M19: when set, sends multipart/alternative (plain text + HTML) instead
-  // of plain-text-only, so the HTML part can carry a clickable tracked
-  // link and an open-tracking pixel — a plain-text email has no way to
-  // render either. trackedLinkUrl alone would technically work in plain
-  // text too (email clients auto-linkify a bare URL), but since
-  // trackingPixelUrl always requires HTML anyway, both go through the same
-  // multipart path for one consistent code path rather than two.
+  // M19/M22: when set, sends multipart/alternative (plain text + HTML)
+  // instead of plain-text-only, so the HTML part can carry the tracked
+  // link as a real clickable <a> (wrapping this exact substring wherever
+  // it's found in `body`) and an open-tracking pixel — a plain-text email
+  // has no way to render either. The plain-text part is `body` verbatim;
+  // most clients auto-linkify a bare URL in plain text anyway, so no
+  // special handling is needed there.
   trackedLinkUrl?: string;
   trackingPixelUrl?: string;
 }
@@ -68,8 +73,22 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function textToHtml(text: string): string {
-  return escapeHtml(text).split("\n").join("<br>\n");
+// Escapes the body for HTML, then wraps any occurrence of linkUrl as a
+// clickable <a> — done by splitting around the (unescaped) link first, so
+// the URL itself is never run through escapeHtml. That matters: a tracked
+// link's query string can contain a literal "&" (see
+// click-tracking.ts/appendTrackingId's tracking_id param), which
+// escapeHtml would turn into "&amp;" — breaking a naive find-after-escape
+// approach, since the escaped text would no longer contain the original
+// URL string to search for.
+function textToHtml(text: string, linkUrl?: string): string {
+  if (!linkUrl || !text.includes(linkUrl)) {
+    return escapeHtml(text).split("\n").join("<br>\n");
+  }
+  return text
+    .split(linkUrl)
+    .map((segment) => escapeHtml(segment).split("\n").join("<br>\n"))
+    .join(`<a href="${linkUrl}">${linkUrl}</a>`);
 }
 
 // Pure RFC 2822 message construction, base64url-encoded the way Gmail's
@@ -89,12 +108,8 @@ export function buildRawEmail(params: RawEmailParams): string {
     return Buffer.from(lines.join("\r\n"), "utf-8").toString("base64url");
   }
 
-  const plainTextBody = trackedLinkUrl ? `${body}\n\n${trackedLinkUrl}` : body;
   const htmlBody = [
-    textToHtml(body),
-    trackedLinkUrl
-      ? `<p><a href="${trackedLinkUrl}">${trackedLinkUrl}</a></p>`
-      : "",
+    textToHtml(body, trackedLinkUrl),
     trackingPixelUrl
       ? `<img src="${trackingPixelUrl}" width="1" height="1" alt="" style="display:none">`
       : "",
@@ -110,7 +125,7 @@ export function buildRawEmail(params: RawEmailParams): string {
     `--${boundary}`,
     "Content-Type: text/plain; charset=utf-8",
     "",
-    plainTextBody,
+    body,
     "",
     `--${boundary}`,
     "Content-Type: text/html; charset=utf-8",

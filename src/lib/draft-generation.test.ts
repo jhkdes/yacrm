@@ -5,6 +5,7 @@ import { createTestDb } from "@/db/test-utils";
 
 import {
   buildDraftPrompt,
+  fillLinkPlaceholder,
   loadPersonDraftContext,
   parseDraftResponse,
   PersonNotFoundError,
@@ -189,6 +190,38 @@ describe("buildDraftPrompt", () => {
 
     expect(user).toContain("no message history on file");
     expect(system).toMatch(/do not fabricate a\s*\n?\s*prior relationship/i);
+  });
+
+  it("instructs the model to use the {{LINK}} placeholder instead of inventing one", () => {
+    const context = contextFor({});
+    const { system } = buildDraftPrompt(context, "try the interview link");
+
+    expect(system).toContain("{{LINK}}");
+  });
+});
+
+describe("fillLinkPlaceholder", () => {
+  it("replaces the {{LINK}} placeholder with the real tracked link", () => {
+    expect(
+      fillLinkPlaceholder(
+        "Try it here: {{LINK}}. Takes 15 minutes.",
+        "https://redirect.example.com/tok-1",
+      ),
+    ).toBe(
+      "Try it here: https://redirect.example.com/tok-1. Takes 15 minutes.",
+    );
+  });
+
+  it("replaces every occurrence, not just the first", () => {
+    expect(fillLinkPlaceholder("{{LINK}} and {{LINK}}", "https://x.test/t")).toBe(
+      "https://x.test/t and https://x.test/t",
+    );
+  });
+
+  it("falls back to appending the link when the placeholder is missing", () => {
+    expect(
+      fillLinkPlaceholder("Hi Ada, hope you're well.", "https://x.test/t"),
+    ).toBe("Hi Ada, hope you're well.\n\nhttps://x.test/t");
   });
 });
 

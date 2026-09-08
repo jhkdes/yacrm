@@ -136,6 +136,11 @@ export function buildDraftPrompt(
     "- If the history is empty, write a cold-outreach email that relies only",
     "  on the contact metadata and the campaign goal — do not fabricate a",
     "  prior relationship.",
+    "- If the campaign goal involves sharing a link (e.g. inviting them to",
+    "  try something), write the exact placeholder text {{LINK}} at the spot",
+    "  where the link belongs — do not invent a URL, and do not write any",
+    "  other placeholder like '[link]' or '[insert link here]'. The real",
+    "  link is substituted in afterward, verbatim, wherever {{LINK}} appears.",
     "- Output exactly two parts: a line starting with 'Subject: ' followed by",
     "  the subject line, a blank line, then the email body. No preamble, no",
     "  explanation, no markdown formatting.",
@@ -159,6 +164,22 @@ export interface GeneratedDraft {
   subject: string;
   body: string;
   raw: string;
+}
+
+const LINK_PLACEHOLDER = "{{LINK}}";
+
+// Pure: substitutes the real tracked link wherever the model wrote the
+// {{LINK}} placeholder the system prompt asked for. Falls back to
+// appending the link at the end if the placeholder is missing (the model
+// forgetting an instruction is a real failure mode, not a hypothetical —
+// see the `[link]`-placeholder bug this was written to fix), so a
+// generated draft never silently ships with no working link at all when
+// one was expected.
+export function fillLinkPlaceholder(body: string, linkUrl: string): string {
+  if (body.includes(LINK_PLACEHOLDER)) {
+    return body.split(LINK_PLACEHOLDER).join(linkUrl);
+  }
+  return `${body}\n\n${linkUrl}`;
 }
 
 // Splits the model's "Subject: ...\n\n<body>" convention back apart. Falls

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { campaign, campaignRecipient, contact, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
@@ -18,12 +18,34 @@ import {
 // channel, tracking-token issuance, dedupe) be exercised without a real
 // network call, the same tradeoff gmail-import.test.ts makes by faking the
 // Gmail client rather than the embeddings call it also depends on.
-vi.mock("@/lib/draft-generation", () => ({
-  generateDraftForPerson: vi.fn(async (_db, personId: number) => ({
-    context: { personId, personName: `Person ${personId}`, contacts: [], events: [] },
-    draft: { subject: `Subject for ${personId}`, body: `Body for ${personId}`, raw: "" },
-  })),
-}));
+vi.mock("@/lib/draft-generation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/draft-generation")>();
+  return {
+    ...actual,
+    generateDraftForPerson: vi.fn(async (_db, personId: number) => ({
+      context: { personId, personName: `Person ${personId}`, contacts: [], events: [] },
+      draft: { subject: `Subject for ${personId}`, body: `Body for ${personId}`, raw: "" },
+    })),
+  };
+});
+
+// Every Campaign created in this file uses a non-null destinationUrl, so
+// every addRecipients call (including the ones exercised indirectly via
+// removeRecipient/deleteCampaign/restoreCampaign/restoreRecipient's setup)
+// needs a real REDIRECT_BASE_URL to build the tracked link against.
+const originalRedirectBaseUrl = process.env.REDIRECT_BASE_URL;
+
+beforeAll(() => {
+  process.env.REDIRECT_BASE_URL = "https://redirect.example.com";
+});
+
+afterAll(() => {
+  if (originalRedirectBaseUrl === undefined) {
+    delete process.env.REDIRECT_BASE_URL;
+  } else {
+    process.env.REDIRECT_BASE_URL = originalRedirectBaseUrl;
+  }
+});
 
 describe("createCampaign", () => {
   let testDb: Awaited<ReturnType<typeof createTestDb>>;
@@ -123,9 +145,14 @@ describe("addRecipients", () => {
       channel: "email",
       status: "drafted",
       draftSubject: `Subject for ${personId}`,
-      draftBody: `Body for ${personId}`,
     });
     expect(rows[0].trackingToken).toBeTruthy();
+    // The mocked draft body has no {{LINK}} placeholder, so
+    // fillLinkPlaceholder falls back to appending the real tracked link —
+    // built from this exact same trackingToken, not a separate one.
+    expect(rows[0].draftBody).toBe(
+      `Body for ${personId}\n\nhttps://redirect.example.com/${rows[0].trackingToken}`,
+    );
   });
 
   it("skips a Person with no active Contact on the requested channel", async () => {
