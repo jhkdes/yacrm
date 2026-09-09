@@ -30,7 +30,7 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M22 | Campaign dashboard + CSV export | ✅ Done | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
 | M23 | 3-day follow-up job | ✅ Done | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
 | M24 | Calendar read + meeting import | ✅ Done | 4 | — | Calendar events land as `meeting` rows with attendees linked |
-| M25 | Attendee-to-contact matching | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
+| M25 | Attendee-to-contact matching | ✅ Done | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
 | M26 | Last-touched staleness view | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
 | M27 | Tagged intro-outreach track | 4 | M17–M21 | Tagging people and launching an "intro" campaign only reaches tagged people |
 
@@ -325,6 +325,8 @@ export const meetingAttendee = pgTable(
 **Test plan**:
 - Integration (pglite): importing a meeting with an attendee sharing a name with an existing Person (different email, different source) results in `generateMergeSuggestions` flagging the pair — same assertion shape as M15's merge test, different source.
 - Manual: verify with a real calendar invite from someone already in the CRM under a different email.
+
+**Shipped as** a change to `importCalendarEvents` in `src/lib/calendar-import.ts`, matching the plan exactly (the `{ identifier, displayName }` in the plan's prose is `{ identifier, name }` — `ContactIdentity`'s actual field name from `contact-resolution.ts`). `CalendarImportSummary.attendeesSkippedNoContact` (M24) is renamed to `attendeesCreated`, since nothing is skipped anymore — every attendee now resolves to a Contact, either matched or newly created. `findOrCreateContact`'s `source` parameter type gained `"google_calendar"` to accept the new call site.
 
 ### M26 — Last-touched staleness view
 

@@ -148,7 +148,7 @@ export async function importCalendarAction(formData: FormData) {
       calendar_meetings_created: String(summary.meetingsCreated),
       calendar_meetings_updated: String(summary.meetingsUpdated),
       calendar_attendees_linked: String(summary.attendeesLinked),
-      calendar_attendees_skipped: String(summary.attendeesSkippedNoContact),
+      calendar_attendees_created: String(summary.attendeesCreated),
     }).toString()}`;
   } catch (err) {
     console.error("Calendar import failed", err);

@@ -33,7 +33,7 @@ export default async function Home({
     calendar_meetings_created?: string;
     calendar_meetings_updated?: string;
     calendar_attendees_linked?: string;
-    calendar_attendees_skipped?: string;
+    calendar_attendees_created?: string;
     calendar_error?: string;
   }>;
 }) {
@@ -177,7 +177,7 @@ export default async function Home({
               <li>Meetings created: {params.calendar_meetings_created}</li>
               <li>Meetings updated: {params.calendar_meetings_updated}</li>
               <li>Attendees linked to an existing contact: {params.calendar_attendees_linked}</li>
-              <li>Attendees skipped (no matching contact yet): {params.calendar_attendees_skipped}</li>
+              <li>New contacts created from unmatched attendees: {params.calendar_attendees_created}</li>
             </ul>
           )}
         </>
