@@ -31,7 +31,7 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M23 | 3-day follow-up job | ✅ Done | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
 | M24 | Calendar read + meeting import | ✅ Done | 4 | — | Calendar events land as `meeting` rows with attendees linked |
 | M25 | Attendee-to-contact matching | ✅ Done | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
-| M26 | Last-touched staleness view | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
+| M26 | Last-touched staleness view | ✅ Done | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
 | M27 | Tagged intro-outreach track | 4 | M17–M21 | Tagging people and launching an "intro" campaign only reaches tagged people |
 
 Phases 1 and the schema half of Phase 2 (M15, M17) have no dependencies on each other and can be built in either order or in parallel.
@@ -339,6 +339,10 @@ export const meetingAttendee = pgTable(
 **Test plan**:
 - Unit: `computeLastTouched` against fixtures (events only, meetings only, both, neither → `null`).
 - Manual: sort `/people` by last-touched, spot-check the top and bottom entries against the DB.
+
+**Shipped as** `src/lib/last-touched.ts`. `listPeopleByLastTouched` aggregates `MAX(occurredAt)`/`MAX(startTime)` per Person in SQL (two grouped queries, one per Event/Meeting) rather than loading every row into memory — a Person with years of Gmail history shouldn't require pulling every message just to answer "when was the last time." A Person with no history at all (`lastTouchedAt: null`) always sorts last regardless of direction, and counts as "quiet" for every day-threshold filter — there's nothing staler than never having touched base.
+
+`src/app/people/page.tsx` gained `?sort=last_touched` and `?quiet_days=30|60|90` query params (both link-driven, no client JS) — the aggregate query only runs when either is present, so the default person list stays as cheap as it always was. The "now" used for the day-threshold cutoff had to move into a plain (non-component) helper function — the React Compiler's `react-hooks/purity` lint rule flags any impure call like `Date.now()` made directly inside a function shaped like a component, this app's Server Components included.
 
 ### M27 — Tagged intro-outreach track
 
