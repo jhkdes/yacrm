@@ -29,7 +29,7 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M21 | LinkedIn copy-assist queue | ✅ Done | 2 | M17 | Walking the queue and clicking "mark sent" flips status without touching email code |
 | M22 | Campaign dashboard + CSV export | ✅ Done | 2 | M17–M21 | Funnel counts on screen match a hand-computed total from seeded data |
 | M23 | 3-day follow-up job | ✅ Done | 3 | M17–M21 | Running the job against fixture data sends exactly the recipients past 3 days who haven't clicked/completed |
-| M24 | Calendar read + meeting import | 4 | — | Calendar events land as `meeting` rows with attendees linked |
+| M24 | Calendar read + meeting import | ✅ Done | 4 | — | Calendar events land as `meeting` rows with attendees linked |
 | M25 | Attendee-to-contact matching | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
 | M26 | Last-touched staleness view | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
 | M27 | Tagged intro-outreach track | 4 | M17–M21 | Tagging people and launching an "intro" campaign only reaches tagged people |
@@ -308,6 +308,15 @@ export const meetingAttendee = pgTable(
 - Unit: `parseCalendarEvent` against fixture Calendar API JSON, including a no-attendee event (returns `null`) and one with an attendee that has no `displayName`.
 - Integration (pglite): `importCalendarEvents` against a fixture event whose attendee email matches an existing contact links them correctly.
 - Manual: connect a real (test) calendar, confirm meetings show up.
+
+**Shipped as** `src/lib/calendar-import.ts`, schema additions in `src/db/schema.ts`, `scripts/list-meetings.ts`.
+
+**Deviations from the plan above**:
+- `GMAIL_SCOPES` was renamed to `GOOGLE_SCOPES` (the plan's own suggested option) — one Google OAuth connection now covers Gmail and Calendar both, so "Gmail scopes" stopped being an accurate name. An account connected before this ships needs to click "Reconnect Gmail" again (same button, now requesting the extra scope) or calendar import fails with a scope error.
+- Token/OAuth-client setup was factored out of `createGmailClient` into a new shared `createGoogleAuthClient(db, accountId)` in `gmail-import.ts`, so the Calendar client (built here) and the Gmail client don't duplicate the refreshed-token-persistence listener.
+- M24's "find existing contact by email or skip" stub is a new `findContactByEmail(db, email)` in `contact-resolution.ts`, restricted to the `gmail`/`hotmail` sources (the only ones whose `sourceIdentifier` is ever email-shaped) rather than matching on `sourceIdentifier` alone.
+- A meeting event with no attendees besides the calendar owner (`self`) or a room/resource (`resource: true`) is treated as no attendees at all, not just a literally-empty `attendees` array — a real event where you're the only human invited (a booked room, a solo hold) shouldn't become a "meeting" any more than one with no attendees field at all.
+- Minimal UI wiring was added even though the plan didn't specify a page: a "Calendar" section on the homepage (same connected-account gating as the existing Gmail import section) with a start-date form, since every other milestone this session has been tested by clicking through the real UI, not just a script. `scripts/list-meetings.ts` still exists for direct DB verification.
 
 ### M25 — Attendee-to-contact matching
 

@@ -1,6 +1,11 @@
 import { eq } from "drizzle-orm";
 
-import { importGmailAction, logoutAction, syncGmailAction } from "@/app/actions";
+import {
+  importCalendarAction,
+  importGmailAction,
+  logoutAction,
+  syncGmailAction,
+} from "@/app/actions";
 import { db } from "@/db/client";
 import { oauthAccount } from "@/db/schema";
 
@@ -24,6 +29,12 @@ export default async function Home({
     import_contacts_promoted?: string;
     import_events_embedded?: string;
     import_error?: string;
+    calendar_events_processed?: string;
+    calendar_meetings_created?: string;
+    calendar_meetings_updated?: string;
+    calendar_attendees_linked?: string;
+    calendar_attendees_skipped?: string;
+    calendar_error?: string;
   }>;
 }) {
   const params = await searchParams;
@@ -138,6 +149,35 @@ export default async function Home({
                 Contacts promoted to active this run: {params.import_contacts_promoted}
               </li>
               <li>Events embedded: {params.import_events_embedded}</li>
+            </ul>
+          )}
+
+          <h2>Calendar</h2>
+          <p style={{ color: "#555" }}>
+            Uses the same Google connection above. If it was connected
+            before calendar access was added, click &quot;Reconnect
+            Gmail&quot; first to grant it.
+          </p>
+          <form action={importCalendarAction}>
+            <label>
+              Import meetings starting:{" "}
+              <input type="date" name="startDate" required />
+            </label>
+            <button type="submit">Import</button>
+          </form>
+
+          {params.calendar_error && (
+            <p style={{ color: "crimson" }}>
+              Calendar import failed: {params.calendar_error}
+            </p>
+          )}
+          {params.calendar_events_processed && (
+            <ul>
+              <li>Calendar events processed: {params.calendar_events_processed}</li>
+              <li>Meetings created: {params.calendar_meetings_created}</li>
+              <li>Meetings updated: {params.calendar_meetings_updated}</li>
+              <li>Attendees linked to an existing contact: {params.calendar_attendees_linked}</li>
+              <li>Attendees skipped (no matching contact yet): {params.calendar_attendees_skipped}</li>
             </ul>
           )}
         </>

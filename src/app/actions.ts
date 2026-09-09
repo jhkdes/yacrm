@@ -8,6 +8,7 @@ import {
   computeAccessToken,
 } from "@/lib/access-gate";
 import { db } from "@/db/client";
+import { importCalendarHistory } from "@/lib/calendar-import";
 import { purgeContact, unpurgeIdentifier } from "@/lib/contact-purge";
 import { ImportSummary, importGmailHistory, syncGmailHistory } from "@/lib/gmail-import";
 import { approveAndSendDraft } from "@/lib/gmail-send";
@@ -121,6 +122,37 @@ export async function importGmailAction(formData: FormData) {
   } catch (err) {
     console.error("Gmail import failed", err);
     redirectTarget = `/?import_error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function importCalendarAction(formData: FormData) {
+  const startDate = formData.get("startDate");
+  if (typeof startDate !== "string" || !startDate) {
+    redirect("/?calendar_error=missing_start_date");
+  }
+
+  const account = await findGmailAccount();
+  if (!account) {
+    redirect("/?calendar_error=no_gmail_account");
+  }
+
+  let redirectTarget: string;
+  try {
+    const summary = await importCalendarHistory(account.id, startDate);
+    redirectTarget = `/?${new URLSearchParams({
+      calendar_events_processed: String(summary.eventsProcessed),
+      calendar_meetings_created: String(summary.meetingsCreated),
+      calendar_meetings_updated: String(summary.meetingsUpdated),
+      calendar_attendees_linked: String(summary.attendeesLinked),
+      calendar_attendees_skipped: String(summary.attendeesSkippedNoContact),
+    }).toString()}`;
+  } catch (err) {
+    console.error("Calendar import failed", err);
+    redirectTarget = `/?calendar_error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
   }

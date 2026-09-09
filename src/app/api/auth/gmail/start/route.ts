@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { GMAIL_SCOPES, createOAuthClient } from "@/lib/google";
+import { GOOGLE_SCOPES, createOAuthClient } from "@/lib/google";
 
 export async function GET() {
   const oauthClient = createOAuthClient();
@@ -8,7 +8,7 @@ export async function GET() {
   const url = oauthClient.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: GMAIL_SCOPES,
+    scope: GOOGLE_SCOPES,
   });
 
   return NextResponse.redirect(url);

@@ -67,7 +67,12 @@ export async function loadGmailAccount(db: DrizzleDb, accountId: number) {
   return account;
 }
 
-export async function createGmailClient(db: DrizzleDb, accountId: number) {
+// Shared by createGmailClient here and createCalendarClient in
+// calendar-import.ts — both read the same oauth_account row (one Google
+// connection covers every scope it was granted, gmail.* and calendar.*
+// alike), so the credential setup and refreshed-token persistence only
+// need to exist once.
+export async function createGoogleAuthClient(db: DrizzleDb, accountId: number) {
   const account = await loadGmailAccount(db, accountId);
   const oauthClient = createOAuthClient();
 
@@ -95,9 +100,15 @@ export async function createGmailClient(db: DrizzleDb, accountId: number) {
       .where(eq(oauthAccount.id, accountId));
   });
 
+  return { oauthClient, ownEmail: account.emailAddress.toLowerCase() };
+}
+
+export async function createGmailClient(db: DrizzleDb, accountId: number) {
+  const { oauthClient, ownEmail } = await createGoogleAuthClient(db, accountId);
+
   return {
     gmail: google.gmail({ version: "v1", auth: oauthClient }),
-    ownEmail: account.emailAddress.toLowerCase(),
+    ownEmail,
   };
 }
 

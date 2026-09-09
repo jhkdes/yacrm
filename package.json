@@ -31,6 +31,7 @@
     "db:generate-draft": "tsx scripts/generate-draft.ts",
     "db:copy-to-remote": "tsx scripts/migrate-to-supabase.ts",
     "db:run-follow-ups": "tsx scripts/run-follow-ups.ts",
+    "db:list-meetings": "tsx scripts/list-meetings.ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
