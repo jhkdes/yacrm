@@ -35,7 +35,7 @@ export interface ContactResolutionResult {
 // "active" Contacts are never downgraded back to "pending".
 export async function findOrCreateContact(
   db: DrizzleDb,
-  source: "gmail" | "hotmail" | "linkedin" | "sms",
+  source: "gmail" | "hotmail" | "linkedin" | "sms" | "google_calendar",
   identity: ContactIdentity,
   status: ContactStatus = "active",
 ): Promise<ContactResolutionResult> {

@@ -1,8 +1,10 @@
+import { eq } from "drizzle-orm";
 import type { calendar_v3 } from "googleapis";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { contact, meeting, meetingAttendee, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
+import { generateMergeSuggestions } from "@/lib/merge-suggestions";
 
 import {
   importCalendarEvents,
@@ -156,7 +158,7 @@ describe("importCalendarEvents", () => {
       meetingsCreated: 1,
       meetingsUpdated: 0,
       attendeesLinked: 1,
-      attendeesSkippedNoContact: 0,
+      attendeesCreated: 0,
     });
 
     const meetingRows = await testDb.db.select().from(meeting);
@@ -174,12 +176,40 @@ describe("importCalendarEvents", () => {
     });
   });
 
-  it("skips an attendee with no matching Contact, without failing the whole import", async () => {
-    const summary = await importCalendarEvents(testDb.db, [parsedMeeting({})]);
+  it("creates a new Contact for an attendee with no matching one, and links it", async () => {
+    const summary = await importCalendarEvents(
+      testDb.db,
+      [parsedMeeting({ attendees: [{ email: "ada@example.com", name: "Ada Lovelace" }] })],
+    );
 
-    expect(summary).toMatchObject({ attendeesLinked: 0, attendeesSkippedNoContact: 1 });
-    expect(await testDb.db.select().from(meeting)).toHaveLength(1);
-    expect(await testDb.db.select().from(meetingAttendee)).toHaveLength(0);
+    expect(summary).toMatchObject({ attendeesLinked: 0, attendeesCreated: 1 });
+
+    const contactRows = await testDb.db.select().from(contact);
+    expect(contactRows).toHaveLength(1);
+    expect(contactRows[0]).toMatchObject({
+      source: "google_calendar",
+      sourceIdentifier: "ada@example.com",
+      displayName: "Ada Lovelace",
+      status: "active",
+    });
+
+    const attendeeRows = await testDb.db.select().from(meetingAttendee);
+    expect(attendeeRows).toHaveLength(1);
+    expect(attendeeRows[0].contactId).toBe(contactRows[0].id);
+  });
+
+  it("doesn't create a duplicate Contact for the same unmatched attendee across two meetings", async () => {
+    await importCalendarEvents(testDb.db, [parsedMeeting({ googleEventId: "evt-1" })]);
+    await importCalendarEvents(testDb.db, [parsedMeeting({ googleEventId: "evt-2" })]);
+
+    const contactRows = await testDb.db
+      .select()
+      .from(contact)
+      .where(eq(contact.source, "google_calendar"));
+    expect(contactRows).toHaveLength(1);
+
+    const attendeeRows = await testDb.db.select().from(meetingAttendee);
+    expect(attendeeRows).toHaveLength(2);
   });
 
   it("updates an existing meeting on re-import instead of duplicating it", async () => {
@@ -210,7 +240,7 @@ describe("importCalendarEvents", () => {
     expect(await testDb.db.select().from(meetingAttendee)).toHaveLength(1);
   });
 
-  it("only matches gmail/hotmail-sourced contacts, not a linkedin profile URL that happens to be stored", async () => {
+  it("only matches gmail/hotmail-sourced contacts, not a linkedin profile URL that happens to be stored — creates a new one instead", async () => {
     const [p] = await testDb.db.insert(person).values({ name: "Ada" }).returning();
     await testDb.db.insert(contact).values({
       personId: p.id,
@@ -220,6 +250,49 @@ describe("importCalendarEvents", () => {
     });
 
     const summary = await importCalendarEvents(testDb.db, [parsedMeeting({})]);
-    expect(summary.attendeesSkippedNoContact).toBe(1);
+    expect(summary).toMatchObject({ attendeesLinked: 0, attendeesCreated: 1 });
+    // Two Contacts now exist for "Ada" under different sources — exactly
+    // the case generateMergeSuggestions (already source-agnostic) is
+    // meant to flag, not something this import resolves itself.
+    expect(await testDb.db.select().from(contact)).toHaveLength(2);
+  });
+
+  it("surfaces a merge suggestion when the new google_calendar Contact shares a name with an existing Person under a different source", async () => {
+    const [p] = await testDb.db.insert(person).values({ name: "Ada Lovelace" }).returning();
+    await testDb.db.insert(contact).values({
+      personId: p.id,
+      source: "gmail",
+      sourceIdentifier: "ada.lovelace@work.example.com",
+      displayName: "Ada Lovelace",
+      status: "active",
+    });
+
+    await importCalendarEvents(
+      testDb.db,
+      [
+        parsedMeeting({
+          attendees: [{ email: "ada@personal.example.com", name: "Ada Lovelace" }],
+        }),
+      ],
+    );
+
+    const allContacts = await testDb.db.query.contact.findMany();
+    const newContact = allContacts.find((c) => c.source === "google_calendar")!;
+    const forMatching = allContacts.map((c) => ({
+      contactId: c.id,
+      personId: c.personId,
+      source: c.source,
+      sourceIdentifier: c.sourceIdentifier,
+      displayName: c.displayName,
+    }));
+
+    const suggestions = generateMergeSuggestions(forMatching);
+    expect(
+      suggestions.some(
+        (s) =>
+          [s.personAId, s.personBId].includes(p.id) &&
+          [s.personAId, s.personBId].includes(newContact.personId),
+      ),
+    ).toBe(true);
   });
 });

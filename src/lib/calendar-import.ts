@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { db as defaultDb } from "@/db/client";
 import { meeting, meetingAttendee } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
-import { findContactByEmail } from "@/lib/contact-resolution";
+import { findContactByEmail, findOrCreateContact } from "@/lib/contact-resolution";
 import { createGoogleAuthClient } from "@/lib/gmail-import";
 
 export interface ParsedMeetingAttendee {
@@ -68,16 +68,21 @@ export interface CalendarImportSummary {
   eventsProcessed: number;
   meetingsCreated: number;
   meetingsUpdated: number;
+  // Matched an existing Contact (any prior source) by email.
   attendeesLinked: number;
-  // An attendee whose email doesn't match any existing Contact — M24
-  // stops here; M25 turns this into a new Contact instead (reusing
-  // findOrCreateContact, source "google_calendar").
-  attendeesSkippedNoContact: number;
+  // No existing Contact matched by email, so a new one was created —
+  // source "google_calendar" (M25). The existing name-similarity
+  // merge-suggestion engine (generateMergeSuggestions, already
+  // source-agnostic) is what reconciles this with, say, a Gmail contact
+  // for the same person under a different address.
+  attendeesCreated: number;
 }
 
 // DB-only — upserts a `meeting` row per event (keyed on googleEventId, so
 // re-importing the same event updates it rather than duplicating it) and
-// links each attendee to their existing Contact by email, when one exists.
+// resolves each attendee to a Contact: an existing one by email if there
+// is one, otherwise a new one (M25) — every attendee ends up linked, none
+// are ever silently dropped.
 export async function importCalendarEvents(
   db: DrizzleDb,
   events: ParsedMeeting[],
@@ -87,7 +92,7 @@ export async function importCalendarEvents(
     meetingsCreated: 0,
     meetingsUpdated: 0,
     attendeesLinked: 0,
-    attendeesSkippedNoContact: 0,
+    attendeesCreated: 0,
   };
 
   for (const ev of events) {
@@ -114,15 +119,28 @@ export async function importCalendarEvents(
 
     for (const attendee of ev.attendees) {
       const matched = await findContactByEmail(db, attendee.email);
-      if (!matched) {
-        summary.attendeesSkippedNoContact += 1;
-        continue;
+      let contactId: number;
+      if (matched) {
+        contactId = matched.contactId;
+        summary.attendeesLinked += 1;
+      } else {
+        const created = await findOrCreateContact(
+          db,
+          "google_calendar",
+          { identifier: attendee.email, name: attendee.name },
+          // A meeting attendee is, like a LinkedIn connection, a mutual
+          // relationship by definition — you were both actually there —
+          // not a one-way message that needs a reply to confirm it.
+          "active",
+        );
+        contactId = created.contactId;
+        summary.attendeesCreated += 1;
       }
+
       await db
         .insert(meetingAttendee)
-        .values({ meetingId: meetingRow.id, contactId: matched.contactId })
+        .values({ meetingId: meetingRow.id, contactId })
         .onConflictDoNothing();
-      summary.attendeesLinked += 1;
     }
   }
 
