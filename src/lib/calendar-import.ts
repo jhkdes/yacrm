@@ -129,10 +129,17 @@ export async function importCalendarEvents(
   return summary;
 }
 
-// Full pipeline: fetches every event starting on/after startDate from the
-// account's primary calendar and imports it. Not unit tested (real network
-// call) — see parseCalendarEvent and importCalendarEvents for the tested
-// pieces, and scripts/import-calendar.ts for real-data verification.
+// Full pipeline: fetches every event between startDate and now (inclusive)
+// from the account's primary calendar and imports it — mirrors Gmail
+// import's "messages after this date" framing (a bounded look backward
+// from today), not an open-ended window. Without an upper bound, a
+// recurring meeting (weekly standup, 1:1, etc.) would contribute every
+// future instance of itself indefinitely, since singleEvents expands a
+// recurring series into individual instances — a real bug caught by a
+// startDate of "2026-08-01" unexpectedly returning 742 events. Not unit
+// tested (real network call) — see parseCalendarEvent and
+// importCalendarEvents for the tested pieces, and scripts/list-meetings.ts
+// for real-data verification.
 export async function importCalendarHistory(
   accountId: number,
   startDate: string,
@@ -140,12 +147,14 @@ export async function importCalendarHistory(
   const { oauthClient } = await createGoogleAuthClient(defaultDb, accountId);
   const calendar = google.calendar({ version: "v3", auth: oauthClient });
 
+  const now = new Date();
   const rawEvents: calendar_v3.Schema$Event[] = [];
   let pageToken: string | undefined;
   do {
     const res = await calendar.events.list({
       calendarId: "primary",
       timeMin: new Date(`${startDate}T00:00:00.000Z`).toISOString(),
+      timeMax: now.toISOString(),
       singleEvents: true,
       pageToken,
       maxResults: 250,
