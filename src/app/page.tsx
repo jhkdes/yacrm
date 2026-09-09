@@ -160,7 +160,7 @@ export default async function Home({
           </p>
           <form action={importCalendarAction}>
             <label>
-              Import meetings starting:{" "}
+              Import meetings from this date through today:{" "}
               <input type="date" name="startDate" required />
             </label>
             <button type="submit">Import</button>
