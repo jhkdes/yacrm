@@ -32,7 +32,7 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M24 | Calendar read + meeting import | ✅ Done | 4 | — | Calendar events land as `meeting` rows with attendees linked |
 | M25 | Attendee-to-contact matching | ✅ Done | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
 | M26 | Last-touched staleness view | ✅ Done | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
-| M27 | Tagged intro-outreach track | 4 | M17–M21 | Tagging people and launching an "intro" campaign only reaches tagged people |
+| M27 | Tagged intro-outreach track | ✅ Done | 4 | M17–M21 | Tagging people and launching an "intro" campaign only reaches tagged people |
 
 Phases 1 and the schema half of Phase 2 (M15, M17) have no dependencies on each other and can be built in either order or in parallel.
 
@@ -366,6 +366,13 @@ export const personTag = pgTable(
 **Test plan**:
 - Integration (pglite): tagging 2 of 5 people and launching an intro campaign against that tag produces exactly 2 `campaign_recipient` rows.
 - Manual: full walkthrough — tag a couple of test contacts, launch, confirm only they appear in the queue/dashboard.
+
+**Shipped as** `src/lib/person-tags.ts` (`normalizeTag`, `toggleTag`, `listTagsForPerson`, `listDistinctTags`, `listPersonIdsByTag`), `toggleTagAction`/`createIntroCampaignAction` in `actions.ts`, wiring on `/people/[id]` and `/campaigns`.
+
+**Deviations from the plan above**:
+- Tags are normalized (trimmed + lowercased) rather than stored verbatim — there's no fixed vocabulary, so this is the only thing stopping "VIP" and "vip" from silently forking into two different tags.
+- The campaigns page's tag picker is a `<select>` of tags that actually exist (`listDistinctTags`), not a free-text field — a typo'd tag name would otherwise silently produce a campaign with zero recipients instead of an error.
+- An "intro" campaign still asks for a goal (used to draft each message's content) even though it has no destination URL — `generateDraftForPerson` needs *some* goal text regardless of channel; only the tracked-link substitution is skipped for this campaign type.
 
 ---
 

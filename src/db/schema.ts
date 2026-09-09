@@ -261,6 +261,7 @@ export const campaignRecipient = pgTable(
 export const personRelations = relations(person, ({ many }) => ({
   contacts: many(contact),
   campaignRecipients: many(campaignRecipient),
+  tags: many(personTag),
 }));
 
 export const contactRelations = relations(contact, ({ one, many }) => ({
@@ -356,3 +357,29 @@ export const meetingAttendeeRelations = relations(
     }),
   }),
 );
+
+// M27: a freeform label a Person can carry, toggled on/off from their
+// profile page — the audience for an "intro" campaign is this explicit,
+// manually curated set, not a rule-based segment (see
+// docs/outreach-roadmap.md's decision on why tagging is manual here).
+export const personTag = pgTable(
+  "person_tag",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    personId: integer("person_id")
+      .notNull()
+      .references(() => person.id, { onDelete: "cascade" }),
+    tag: text("tag").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [unique().on(table.personId, table.tag)],
+);
+
+export const personTagRelations = relations(personTag, ({ one }) => ({
+  person: one(person, {
+    fields: [personTag.personId],
+    references: [person.id],
+  }),
+}));

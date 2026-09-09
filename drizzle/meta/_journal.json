@@ -85,6 +85,13 @@
       "when": 1788907246286,
       "tag": "0011_pretty_swarm",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788932825751,
+      "tag": "0012_many_juggernaut",
+      "breakpoints": true
     }
   ]
 }

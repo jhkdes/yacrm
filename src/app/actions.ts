@@ -39,6 +39,7 @@ import {
   undismissMergeSuggestion,
 } from "@/lib/merge-dismissals";
 import { mergePersons, unmergePerson } from "@/lib/person-merge";
+import { listPersonIdsByTag, toggleTag } from "@/lib/person-tags";
 
 const ONE_MONTH_SECONDS = 60 * 60 * 24 * 30;
 
@@ -536,6 +537,66 @@ export async function createCampaignAction(formData: FormData) {
   redirect(redirectTarget);
 }
 
+// M27's tagged intro-outreach track: the audience is exactly whoever
+// carries the given tag — an explicit, manually curated list, not a
+// rule-based segment — so this skips rankPeopleForCampaign entirely
+// rather than ranking-then-filtering. No destinationUrl (an "intro"
+// campaign has no tracked link at all, per campaign.ts's CampaignType).
+export async function createIntroCampaignAction(formData: FormData) {
+  const name = formData.get("name");
+  const goal = formData.get("goal");
+  const channel = formData.get("channel");
+  const tag = formData.get("tag");
+
+  if (
+    typeof name !== "string" ||
+    !name.trim() ||
+    typeof goal !== "string" ||
+    !goal.trim() ||
+    !isCampaignChannel(channel) ||
+    typeof tag !== "string" ||
+    !tag.trim()
+  ) {
+    redirect(
+      `/campaigns?${new URLSearchParams({
+        tag: typeof tag === "string" ? tag : "",
+        error: "invalid_campaign_request",
+      }).toString()}`,
+    );
+  }
+
+  let redirectTarget: string;
+  try {
+    const personIds = await listPersonIdsByTag(db, tag as string);
+    const { campaignId } = await createCampaign(
+      db,
+      name as string,
+      goal as string,
+      null,
+      "intro",
+    );
+    const result = await addRecipients(
+      db,
+      campaignId,
+      personIds.map((personId) => ({ personId })),
+      channel as CampaignChannel,
+    );
+    redirectTarget = `/campaigns/${campaignId}?${new URLSearchParams({
+      added: String(result.added),
+      skipped_no_contact: String(result.skippedNoContactForChannel),
+      skipped_draft_failed: String(result.skippedDraftFailed),
+    }).toString()}`;
+  } catch (err) {
+    console.error("Intro campaign creation failed", err);
+    redirectTarget = `/campaigns?${new URLSearchParams({
+      tag: tag as string,
+      error: err instanceof Error ? err.message : "unknown_error",
+    }).toString()}`;
+  }
+
+  redirect(redirectTarget);
+}
+
 export async function addRecipientsToCampaignAction(formData: FormData) {
   const campaignId = Number(formData.get("campaignId"));
   const channel = formData.get("channel");
@@ -770,6 +831,30 @@ export async function unmergePersonAction(formData: FormData) {
   } catch (err) {
     console.error("Un-merge failed", err);
     redirectTarget = `/people?unmerge_error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+// One control on the Person's profile page drives both directions — adds
+// the tag if they don't have it, removes it if they do.
+export async function toggleTagAction(formData: FormData) {
+  const personId = Number(formData.get("personId"));
+  const tag = formData.get("tag");
+
+  if (!Number.isInteger(personId) || typeof tag !== "string" || !tag.trim()) {
+    redirect(`/people/${personId}?tag_error=invalid_tag`);
+  }
+
+  let redirectTarget: string;
+  try {
+    await toggleTag(db, personId, tag as string);
+    redirectTarget = `/people/${personId}`;
+  } catch (err) {
+    console.error("Tag toggle failed", err);
+    redirectTarget = `/people/${personId}?tag_error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
   }

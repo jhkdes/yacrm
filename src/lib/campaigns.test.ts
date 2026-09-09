@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { campaign, campaignRecipient, contact, person } from "@/db/schema";
@@ -11,6 +12,7 @@ import {
   restoreCampaign,
   restoreRecipient,
 } from "@/lib/campaigns";
+import { listPersonIdsByTag, toggleTag } from "@/lib/person-tags";
 
 // generateDraftForPerson's full pipeline calls the real Anthropic API and
 // is deliberately left untested at that layer (see draft-generation.ts) —
@@ -491,5 +493,67 @@ describe("restoreRecipient", () => {
 
     const result = await restoreRecipient(testDb.db, campaignId, recipient.id);
     expect(result.restored).toBe(false);
+  });
+});
+
+// M27: the tagged intro-outreach track skips rankPeopleForCampaign
+// entirely — the audience is exactly whoever carries the tag, an
+// explicit, manually curated list — and reuses addRecipients directly.
+describe("intro campaign targeting a tag", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+  });
+
+  it("adding everyone with a given tag produces exactly one recipient per tagged person", async () => {
+    const names = ["Ada", "Bob", "Carol", "Dana", "Erin"];
+    const peopleIds: number[] = [];
+    for (const name of names) {
+      const [p] = await testDb.db.insert(person).values({ name }).returning();
+      await testDb.db.insert(contact).values({
+        personId: p.id,
+        source: "gmail",
+        sourceIdentifier: `${name.toLowerCase()}@example.com`,
+        status: "active",
+      });
+      peopleIds.push(p.id);
+    }
+
+    // Tag exactly 2 of the 5.
+    await toggleTag(testDb.db, peopleIds[0], "vip");
+    await toggleTag(testDb.db, peopleIds[2], "vip");
+
+    const { campaignId } = await createCampaign(
+      testDb.db,
+      "Fall intro round",
+      "reconnect",
+      null,
+      "intro",
+    );
+
+    const taggedPersonIds = await listPersonIdsByTag(testDb.db, "vip");
+    expect(taggedPersonIds).toHaveLength(2);
+
+    const result = await addRecipients(
+      testDb.db,
+      campaignId,
+      taggedPersonIds.map((personId) => ({ personId })),
+      "email",
+    );
+
+    expect(result.added).toBe(2);
+    const rows = await testDb.db
+      .select()
+      .from(campaignRecipient)
+      .where(eq(campaignRecipient.campaignId, campaignId));
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.personId).sort()).toEqual(
+      [peopleIds[0], peopleIds[2]].sort(),
+    );
   });
 });
