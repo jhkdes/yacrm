@@ -1,15 +1,20 @@
 import { notFound } from "next/navigation";
 
+import { toggleTagAction } from "@/app/actions";
 import { db } from "@/db/client";
 import { inferCompanyDomains } from "@/lib/company-signal";
+import { listTagsForPerson } from "@/lib/person-tags";
 import { buildPersonTimeline } from "@/lib/person-timeline";
 
 export default async function PersonProfilePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ tag_error?: string }>;
 }) {
   const { id } = await params;
+  const query = await searchParams;
   const personId = Number(id);
   if (!Number.isInteger(personId)) {
     notFound();
@@ -24,6 +29,7 @@ export default async function PersonProfilePage({
   }
 
   const companyDomains = inferCompanyDomains(person.contacts);
+  const tags = await listTagsForPerson(db, personId);
 
   const timeline = buildPersonTimeline(person.contacts);
 
@@ -52,6 +58,43 @@ export default async function PersonProfilePage({
           ))}
         </p>
       )}
+
+      <h2>Tags</h2>
+      {query.tag_error && (
+        <p style={{ color: "crimson" }}>Failed: {query.tag_error}</p>
+      )}
+      <p>
+        {tags.length === 0 ? (
+          <span style={{ color: "#555" }}>No tags yet.</span>
+        ) : (
+          tags.map((tag) => (
+            <span key={tag} style={{ marginRight: "0.5rem" }}>
+              <span
+                style={{
+                  background: "#eee",
+                  borderRadius: 4,
+                  padding: "0.2rem 0.5rem",
+                }}
+              >
+                {tag}
+              </span>{" "}
+              <form action={toggleTagAction} style={{ display: "inline" }}>
+                <input type="hidden" name="personId" value={personId} />
+                <input type="hidden" name="tag" value={tag} />
+                <button type="submit">Remove</button>
+              </form>
+            </span>
+          ))
+        )}
+      </p>
+      <form action={toggleTagAction}>
+        <input type="hidden" name="personId" value={personId} />
+        <label>
+          Add tag:{" "}
+          <input type="text" name="tag" placeholder="e.g. vip" required />
+        </label>
+        <button type="submit">Add</button>
+      </form>
 
       <h2>Contacts</h2>
       <ul>
