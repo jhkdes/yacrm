@@ -1,0 +1,8 @@
+CREATE TYPE "public"."company_industry" AS ENUM('tech_enterprise_software', 'tech_dev_tools_infra', 'tech_cybersecurity', 'tech_fintech', 'tech_healthtech', 'tech_edtech', 'tech_martech_adtech', 'tech_consumer_software', 'tech_gaming', 'tech_hardware_semiconductors', 'telecommunications', 'financial_services', 'healthcare', 'retail_ecommerce', 'manufacturing_industrial', 'media_entertainment', 'professional_services', 'education', 'government_public_sector', 'nonprofit', 'real_estate', 'transportation_logistics', 'energy_utilities', 'other', 'unknown');--> statement-breakpoint
+CREATE TYPE "public"."person_function" AS ENUM('product_management', 'product_marketing', 'engineering', 'design', 'data_analytics', 'sales', 'marketing', 'customer_success', 'operations', 'finance', 'people_hr', 'legal', 'it', 'executive_general', 'other');--> statement-breakpoint
+CREATE TYPE "public"."person_seniority" AS ENUM('ic', 'manager', 'director', 'vp', 'c_level', 'founder', 'unknown');--> statement-breakpoint
+ALTER TABLE "person" ADD COLUMN "linkedin_raw_title" text;--> statement-breakpoint
+ALTER TABLE "person" ADD COLUMN "linkedin_raw_company" text;--> statement-breakpoint
+ALTER TABLE "person" ADD COLUMN "standardized_title" text;--> statement-breakpoint
+ALTER TABLE "person" ADD COLUMN "seniority" "person_seniority";--> statement-breakpoint
+ALTER TABLE "person" ADD COLUMN "function" "person_function";

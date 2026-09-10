@@ -33,6 +33,13 @@ Every milestone below states its test plan in these terms: what's a `*.test.ts` 
 | M25 | Attendee-to-contact matching | ✅ Done | 4 | M24 | An unmatched attendee becomes a contact and a merge suggestion appears |
 | M26 | Last-touched staleness view | ✅ Done | 4 | M24, M25 | Sorting people by last-touched matches a hand-computed answer from fixture events/meetings |
 | M27 | Tagged intro-outreach track | ✅ Done | 4 | M17–M21 | Tagging people and launching an "intro" campaign only reaches tagged people |
+| M28 | Title/seniority/function extraction | ✅ Done | 5 | M15 | Re-importing an unchanged CSV classifies nothing; a changed title/company triggers exactly one re-classification for that person |
+| M29 | Company normalization + industry inference | Not started | 5 | M28 | Two people at the same normalized company share one cached industry inference; "Amazon"/"AWS" never merge |
+| M30 | `mergePersons` field preservation | Not started | 5 | M28, M29 | Merging two Persons keeps the LinkedIn-derived fields from whichever side has them, never silently drops them |
+| M31 | CSV-row-to-person matching + nickname-aware merge suggestions | Not started | 5 | M28 | A CSV row with a matching email attaches to the existing Person; a name-only match never auto-merges, only appears on `/merges` |
+| M32 | Deterministic structured filter | Not started | 5 | M28–M31 | Filtering with no criteria returns every Person with an active LinkedIn contact regardless of message history |
+| M33 | LLM goal→filter drafting | Not started | 5 | M32 | A goal like "hiring enterprise PMs" drafts an editable filter with `function: product_management` pre-checked |
+| M34 | Candidate table polish: sort, warnings, drawer | Not started | 5 | M32 | Sorting/threshold warnings work via query params; the drawer's "Open LinkedIn" opens the right profile in a new tab |
 
 Phases 1 and the schema half of Phase 2 (M15, M17) have no dependencies on each other and can be built in either order or in parallel.
 
@@ -373,6 +380,99 @@ export const personTag = pgTable(
 - Tags are normalized (trimmed + lowercased) rather than stored verbatim — there's no fixed vocabulary, so this is the only thing stopping "VIP" and "vip" from silently forking into two different tags.
 - The campaigns page's tag picker is a `<select>` of tags that actually exist (`listDistinctTags`), not a free-text field — a typo'd tag name would otherwise silently produce a campaign with zero recipients instead of an error.
 - An "intro" campaign still asks for a goal (used to draft each message's content) even though it has no destination URL — `generateDraftForPerson` needs *some* goal text regardless of channel; only the tracked-link substitution is skipped for this campaign type.
+
+---
+
+## Phase 5 — Campaign Targeting Rework
+
+Companion design doc: [`docs/outreach-roadmap.md`](./outreach-roadmap.md)'s Phase 5 section (product decisions), [`docs/title-taxonomy.md`](./title-taxonomy.md) and [`docs/industry-taxonomy.md`](./industry-taxonomy.md) (the canonical enum tables the LLM prompts quote verbatim).
+
+### M28 — Title/seniority/function extraction ✅
+
+**Schema additions** (`src/db/schema.ts`, migration `0013`):
+
+```ts
+export const personSeniorityEnum = pgEnum("person_seniority", [
+  "ic", "manager", "director", "vp", "c_level", "founder", "unknown",
+]);
+export const personFunctionEnum = pgEnum("person_function", [
+  "product_management", "product_marketing", "engineering", "design",
+  "data_analytics", "sales", "marketing", "customer_success", "operations",
+  "finance", "people_hr", "legal", "it", "executive_general", "other",
+]);
+```
+
+New nullable columns on `person`: `linkedinRawTitle`, `linkedinRawCompany`, `standardizedTitle`, `seniority`, `function`. Deliberately person-level, not contact-level, even though the source is LinkedIn-only — required so M30's `mergePersons` can reconcile them across a merge as ordinary person-row state, mirroring how `person.summaryEmbedding` already works. `null` means "never classified"; `seniority: "unknown"` / `function: "other"` means "classified, taxonomy's ambiguity rule applied" — these are distinct states the filter UI (M32) must not collapse.
+
+**Shipped as** `src/lib/title-extraction.ts`:
+- `buildTitleExtractionPrompt(rows)` / `parseTitleExtractionResponse(raw)` — **pure**. Uses Anthropic tool-use with an enum-constrained JSON schema (`classify_titles` tool) rather than free-text "respond with JSON" — the schema's `enum` guides the model but isn't a hard server-side guarantee, so `parseTitleExtractionResponse` still coerces any out-of-taxonomy value to `unknown`/`other` rather than trusting or throwing on it. System prompt quotes `docs/title-taxonomy.md`'s tables and worked examples inline (kept in sync by hand — no runtime file read).
+- `classifyTitles(db, rows)` — **full-pipeline**. Batches rows (`BATCH_SIZE = 30`) and persists `standardizedTitle`/`seniority`/`function` back onto `person`. Uses `claude-haiku-4-5-20251001`, not `draft-generation.ts`'s `DRAFT_MODEL` — classification, not creative writing, doesn't need the larger model.
+
+**Changes to `src/lib/linkedin-import.ts`**: retired the M15 synthetic profile `event` (`"{position} at {company}"`) and its embedding step entirely — once Phase 5 drops embedding-based targeting (M32), that event's only purpose disappeared, and leaving it would have polluted a future "last-interaction date" column with a fake interaction. Each row's `position`/`company` is now diffed against the matched Person's stored `linkedinRawTitle`/`linkedinRawCompany`; unchanged rows are skipped (no LLM call), changed/new rows are queued into `classifyTitles`.
+
+**Test plan** (as built):
+- Unit: `title-extraction.test.ts` — prompt builder against taxonomy example rows; response parser against fixture tool_use output, including out-of-taxonomy coercion and a missing-tool-call error case.
+- Integration (pglite): `linkedin-import.test.ts` — `classifyTitles` mocked (same pattern as `campaigns.test.ts` mocking `generateDraftForPerson`); asserts unchanged re-import re-classifies nothing, a changed title re-classifies exactly that person, raw fields persist correctly.
+- Manual: `scripts/classify-titles.ts` (`npm run db:classify-titles -- [limit]`) against real imported people, eyeballed against `docs/title-taxonomy.md`.
+
+**Related fix, surfaced by this milestone**: a real 1,850-row connections export took over 5 minutes and didn't visibly complete — two compounding causes, both fixed same-day:
+1. The per-row diff check was a `findFirst` query per row (~1,850 sequential round-trips). Replaced with one batched `SELECT ... WHERE id IN (...)` across every resolved Person after the `findOrCreateContact` loop, instead of inside it.
+2. `classifyTitles` ran its ~62 batches fully sequentially (one Anthropic call at a time). Added `runWithConcurrency` — a small worker-pool helper (exported, unit-tested for order-preservation and the concurrency cap) — capping it at `CLASSIFY_CONCURRENCY = 5` concurrent batches instead of unbounded or fully serial, cutting that portion roughly 5x without risking a rate-limit burst from firing all batches at once.
+
+Not a new milestone — a scaling fix to this milestone's own logic, the same pattern M15's merge-suggestions fix followed.
+
+### M29 — Company normalization + industry inference
+
+**Schema**: new enum `companyIndustryEnum` (25 values, see `docs/industry-taxonomy.md`); new table `companyIndustryCache` (`normalizedCompanyName` unique, `industry`, `inferredAt`) — the per-company cache, keyed independent of any one Person. New nullable columns on `person`: `normalizedCompanyName`, `industry` (a denormalized copy at classification time — a later re-inference of the same company wouldn't retroactively update existing people; accepted tradeoff, re-inference isn't in scope).
+
+**Planned as** `src/lib/company-normalization.ts` (`normalizeCompanyName` — **pure**, strips legal suffixes only via a fixed list, case-insensitive trailing-token match; never fuzzy-merges beyond that — "Amazon"/"AWS" must stay distinct, the specific failure mode rejected during design) and `src/lib/industry-inference.ts` (same pure/impure split as M28, tool-use, enum-constrained, quoting `docs/industry-taxonomy.md` including its `tech_*`-vs-traditional-industry disambiguation examples).
+
+**Wiring**: after normalizing a changed row's company, check `companyIndustryCache`; miss → queue for inference, deduped across the whole import batch. When a company's industry is newly cached, backfill it onto *all* existing people at that normalized company, not just the row being processed — otherwise two people imported months apart at the same company could end up with different industry values purely by import timing.
+
+**Test plan (planned)**:
+- Unit: `normalizeCompanyName` against every suffix in the starter list, plus the Amazon/AWS non-merge case and punctuation/casing variants of the same real name.
+- Integration (pglite): cache-hit (no LLM call) vs. cache-miss + backfill paths.
+- Manual: `scripts/classify-industries.ts` against real company names, spot-checked against the taxonomy doc.
+
+### M30 — `mergePersons` field preservation
+
+Sequenced right after M28/M29 so the window where a real merge could silently drop the new fields closes before M32's filter depends on them being trustworthy.
+
+**Planned change to `src/lib/person-merge.ts`**: factor out a pure `mergePersonFields(survivor, absorbed)` — survivor's own non-null value wins per field (`linkedinRawTitle`, `standardizedTitle`, `seniority`, `function`, `linkedinRawCompany`, `normalizedCompanyName`, `industry`), falling back to absorbed's value only where survivor's is null. `mergePersons` calls it and writes the result before deleting the absorbed row.
+
+**Test plan (planned)**: unit — `mergePersonFields` covering survivor-wins, absorbed-fills-null, both-null, both-populated. Integration (pglite) — full `mergePersons` with the new fields populated differently on each side.
+
+### M31 — CSV-row-to-person matching + nickname-aware merge suggestions
+
+**Part A (primary path)**: planned `attachContactToExistingPerson(db, source, identity, personId, status)` in `src/lib/contact-resolution.ts` — inserts a `contact` row against a *given* `personId` instead of always creating a new solo person. In `linkedin-import.ts`: `row.email` present → `findContactByEmail(db, row.email)` (already exists, from M24) → match → `attachContactToExistingPerson`; no match/no email → today's `findOrCreateContact` fallback, unchanged.
+
+**Part B (fallback path, never auto-merges)**: planned `src/lib/nickname-equivalence.ts` — a static table of nickname groups (Rob/Robert/Bob, Nick/Nicholas, Bill/William/Liam, etc. — a starter list, explicitly non-exhaustive). Consulted inside `merge-suggestions.ts`'s `scoreContactPair` alongside (not replacing) existing `nameSimilarity`. Confirmed during design: the app has no auto-merge path anywhere (every merge on `/merges` is user-confirmed) — this milestone does not introduce one. A name-based match, nickname-aided or not, only ever surfaces as a suggestion.
+
+**Test plan (planned)**: integration (pglite) — email match attaches to existing person (no new person created); no-email/no-match still creates new person (regression). Unit — nickname matching fires for Rob/Robert, doesn't over-fire for unrelated similar names. Manual — re-run `scripts/suggest-merges.ts` before/after on real data.
+
+### M32 — Deterministic structured filter
+
+Core of Phase 5 — everything before it is groundwork.
+
+**Planned as** `src/lib/candidate-filter.ts`: `StructuredFilter` (`titleQuery`, `seniority[]`, `function[]`, `industry[]` — OR within a field, AND across fields) and `filterCandidates(db, filter)`. Query: any `person` with an *active* `linkedin` contact — no event-join requirement (the actual behavior change from today's embedding-ranking-based `loadCandidates` in `campaign-ranking.ts`, which this supersedes for targeting) — left-joined to M26's last-touched aggregate for display. Default sort `person.name`. `BROAD_RESULT_THRESHOLD` constant (placeholder 200, to tune against real connection counts) lives alongside the filter function.
+
+**Wiring**: `src/app/campaigns/page.tsx` / `src/app/actions.ts` swap `rankPeopleForCampaign(db, goal)` for `filterCandidates(db, filter)` (filter from checkbox query params in this milestone — the LLM-drafted version is additive in M33).
+
+**Test plan (planned)**: integration (pglite) — each filter field narrows correctly and ANDs together; empty filter returns everyone with an active LinkedIn contact regardless of message history (key regression test for the event-requirement removal); a `pending` LinkedIn contact is excluded; an active contact with zero events is included.
+
+### M33 — LLM goal→filter drafting + review/edit step
+
+**Planned as** `src/lib/filter-drafting.ts`: `buildFilterDraftPrompt(goal)` / `parseFilterDraftResponse(raw)` (pure, tool-use, enum-constrained) and `draftFilterFromGoal(goal)` (full-pipeline). New `draftFilterAction` (same FormData → lib call → redirect-with-URLSearchParams pattern as `createCampaignAction`) pre-fills M32's checkbox form with the drafted filter's fields — "review and edit" is the checkboxes arriving pre-checked, no new UI surface.
+
+**Test plan (planned)**: unit — prompt/parser against fixture goals spanning each taxonomy dimension. Manual — `scripts/draft-filter.ts` against real goal strings (inherently judgment-based, no automated test for the impure LLM call itself, per this doc's own conventions).
+
+### M34 — Candidate table polish: sortable columns, warnings, side drawer
+
+**Planned**: `?sort=title|company|seniority|industry|lastInteraction&dir=asc|desc` driving `filterCandidates`'s `ORDER BY`, same link-driven pattern as M26's last-touched sorting — no client JS. 0-result and broad-result (`> BROAD_RESULT_THRESHOLD`) warnings as conditional JSX.
+
+New `src/app/campaigns/CandidateDrawer.tsx`, `"use client"` — this app's **second** Client Component (the first is M21's `CopyButton.tsx`, narrow-leaf by design). Takes server-fetched detail for one person as props, renders an overlay with `useState` open/closed, and `<a href={linkedinProfileUrl} target="_blank" rel="noopener noreferrer">Open LinkedIn</a>` (new tab — LinkedIn blocks iframing, a hard constraint, not a preference).
+
+**Test plan (planned)**: integration (pglite) — sort ordering per field, threshold boundary. Manual only for the drawer itself (no component-test framework exists in this repo).
 
 ---
 

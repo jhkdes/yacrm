@@ -13,6 +13,7 @@ Today yaCRM imports Gmail, resolves contacts into merged profiles, and can rank 
 | 2 · Campaign Send & Tracking | Persisted campaigns (+ management/undo), role targeting, tracked link, open/click/completion funnel, dashboard + export | Phase 1 (for LinkedIn recipients) | 🟡 In progress — campaigns persist & are manageable; tracking/send/dashboard not yet built |
 | 3 · Automated Follow-Up | One 3-day nudge, skipped if already clicked/completed | Phase 2 (needs recipient status) | Not started |
 | 4 · Relationship Maintenance | Calendar-sourced meeting history, staleness view, tagged intro-outreach track | Phase 2 (reuses send infra) | Not started |
+| 5 · Campaign Targeting Rework | Richer goal capture, structured (non-semantic) filtering on LinkedIn-derived title/seniority/function/industry, wider candidate pool, in-app candidate detail + LinkedIn link | Phase 1 (extends the LinkedIn importer) | Not started |
 
 ---
 
@@ -101,6 +102,38 @@ Solves problems 5 and 6 — generic networking outreach and knowing who's gone q
 - Reuses Phase 2's send/draft infrastructure as a second, lighter-touch message track (generic "let's connect" rather than interview-link).
 - Audience is a manually tagged list, not a rule-based segment — you decide who's in.
 - Same channel handling as Phase 2: email auto-sends, LinkedIn goes through the copy-assist queue.
+
+---
+
+## Phase 5 — Campaign Targeting Rework
+
+Solves three problems surfaced by actually using Phase 2's targeting in practice: (1) a one-line campaign goal can't express real targeting intent, (2) the candidate pool is both too narrow (excludes anyone without prior message history) and biased toward people already contacted recently, (3) suggested people show no context (title, company) and no path to their LinkedIn profile without losing the list.
+
+**What exists today**
+- `campaign.goal` (free text) and `campaign-ranking.ts`'s `similarity×0.6 + recency×0.25 + engagement×0.15` scoring, per Phase 2.
+- `loadCandidates` (`campaign-ranking.ts`) requires an *active* `contact` **and at least one `event`** — a LinkedIn 1st-degree connection with no message history is invisible to targeting today, even though Phase 1 already imports them.
+- The LinkedIn connections importer (`linkedin-import.ts`, Phase 1/M15) already captures name, company, position, profile URL, connected-date per row, but only writes a synthetic profile `event` for embedding purposes — it doesn't persist structured title/company/industry fields.
+
+**Decisions locked**
+- *Goal capture*: the free-text goal field stays (still feeds drafting) — it's not replaced by a form. An LLM call drafts a **structured, editable filter** (title/seniority/function/industry, per the fixed taxonomies below) from the goal text; the user reviews and edits the *filter*, not the prose, before it runs.
+- *Targeting mechanism*: candidate selection becomes a **pure deterministic structured filter** — no embedding/semantic ranking step, no LLM involved in picking or scoring individual people. This reverses Phase 2's semantic-ranking approach for targeting specifically, once the structured fields below exist to filter on directly.
+- *Candidate pool*: drop the "must have an `event`" requirement — any person with an active LinkedIn contact is eligible, whether or not they've been messaged.
+- *Recency/engagement weighting*: removed entirely from targeting. Recency of prior contact has no bearing on whether someone is a good campaign target.
+- *Result ordering*: no ranking score to sort by. Unsorted by default (first-name), user can sort any column in the UI.
+- *Empty/overbroad results*: UI surfaces a warning on 0 matches ("try loosening filters") and on very broad matches (e.g. hundreds of results), rather than silently returning either extreme.
+- *Candidate visibility*: the suggestion list/table shows standardized title, company, seniority, industry, and last-interaction date per person. A side drawer shows full detail plus an "Open LinkedIn" link (opens the profile URL in a new tab — LinkedIn cannot be embedded in-app, it blocks iframing).
+
+**What's new — LinkedIn import enrichment**
+- Extends the existing importer (Phase 1) to persist, per person: raw title, LLM-standardized title, seniority, function (see [title-taxonomy.md](./title-taxonomy.md)), raw company name, rule-normalized company name (legal-suffix stripping only — e.g. "Inc.", "LLC", "Corp." — deliberately *not* fuzzy-merged further: "Amazon" and "AWS" stay distinct rather than risk merging genuinely different entities), and industry (see [industry-taxonomy.md](./industry-taxonomy.md)).
+- Industry is inferred once per normalized company name via LLM (using the company's real-world identity, not per-person data) and cached — not re-inferred per person, and not re-inferred on re-import unless the normalized name is new. Company headcount is explicitly **not** inferred (it's volatile and unverifiable from a company name alone); no headcount field/filter exists.
+- Title/seniority/function extraction runs once per person at import time, and only re-runs on re-import for rows that are new or whose raw title/company changed since the last import (a hash/diff against the previously imported row).
+- **CSV-row-to-person matching** (for updating existing people vs. creating new ones): email exact match when the CSV row has one; otherwise fuzzy first/last-name match (accounting for common nickname equivalence — "Rob"/"Robert", "Nick"/"Nicholas" — and last-initial-only forms). Auto-merge only when exactly one confident candidate is found; an ambiguous or multi-candidate match is **not** auto-merged — it's surfaced as a suggested match for manual review, same pattern as the existing merge-suggestion engine. Once a person has been matched once, later re-imports match directly on our own previously-stored LinkedIn URL first (fast path), falling back to email/name only for people not yet seen.
+- Both taxonomies use an explicit `unknown`/`other` value and an "if not confident, don't guess" rule — a wrong-but-plausible-looking classification silently corrupts filter results, where an unclassified one visibly signals a gap instead.
+
+**Explicitly out of scope**
+- Company headcount (or any other enrichment requiring a third-party data source) — not buildable from the LinkedIn CSV export alone, and not worth a paid enrichment integration at this stage.
+- Any embedded/iframed LinkedIn profile view — not technically possible (LinkedIn blocks iframing); "Open LinkedIn" opens a new tab instead.
+- Re-introducing semantic/embedding ranking anywhere in targeting — deliberately dropped in favor of a fully deterministic, debuggable filter.
 
 ---
 
