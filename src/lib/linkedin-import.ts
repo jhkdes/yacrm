@@ -45,6 +45,40 @@ function parseConnectedOn(value: string | undefined): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+// A real ~1,850-row import hit Vercel's 300s serverless timeout running as
+// one long request — MAX_CONNECTIONS_ROWS caps how large a single upload
+// can be at all, and CONNECTIONS_BATCH_SIZE is how the caller (the batch
+// Server Action in actions.ts) chunks a file under that cap into many
+// small, independent requests instead.
+export const MAX_CONNECTIONS_ROWS = 10_000;
+export const CONNECTIONS_BATCH_SIZE = 120;
+
+export class TooManyRowsError extends Error {
+  constructor(public readonly rowCount: number) {
+    super(
+      `This file has ${rowCount} connections, which is more than the ${MAX_CONNECTIONS_ROWS}-row limit. Split it into smaller files and import them separately.`,
+    );
+    this.name = "TooManyRowsError";
+  }
+}
+
+// Pure — throws rather than returning a boolean so the caller can't
+// forget to check a return value; the batch action catches this
+// specifically to build its "too_many_rows" result.
+export function assertRowCountAllowed(rowCount: number): void {
+  if (rowCount > MAX_CONNECTIONS_ROWS) {
+    throw new TooManyRowsError(rowCount);
+  }
+}
+
+// Pure — kept separate from the action so the off-by-one edge cases (exact
+// multiples of CONNECTIONS_BATCH_SIZE, 0 rows) are unit testable without a
+// DB or FormData. Math.max(1, ...) so a 0-row file still reports 1
+// (trivially-completing) batch rather than a "batch 0 of 0" client state.
+export function computeBatchPlan(totalRows: number): { totalBatches: number } {
+  return { totalBatches: Math.max(1, Math.ceil(totalRows / CONNECTIONS_BATCH_SIZE)) };
+}
+
 // LinkedIn's "Download your data" connections export prepends a Notes:
 // preamble (a quoted, possibly multi-line disclaimer) before the actual
 // header row. This function is pure — no I/O — so it can be unit tested
