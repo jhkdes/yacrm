@@ -3,6 +3,8 @@ import {
   importLinkedInMessagesAction,
 } from "@/app/actions";
 
+import { ImportSubmitButton } from "./ImportSubmitButton";
+
 export default async function ImportLinkedIn({
   searchParams,
 }: {
@@ -39,7 +41,7 @@ export default async function ImportLinkedIn({
 
       <form action={importLinkedInConnectionsAction}>
         <input type="file" name="file" accept=".csv" required />
-        <button type="submit">Import</button>
+        <ImportSubmitButton />
       </form>
 
       {params.import_error && (
@@ -79,7 +81,7 @@ export default async function ImportLinkedIn({
           </label>
         </p>
         <input type="file" name="file" accept=".csv" required />
-        <button type="submit">Import</button>
+        <ImportSubmitButton />
       </form>
 
       {params.messages_import_error && (
