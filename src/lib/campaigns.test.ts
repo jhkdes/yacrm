@@ -11,6 +11,7 @@ import {
   removeRecipient,
   restoreCampaign,
   restoreRecipient,
+  updateRecipientDraft,
 } from "@/lib/campaigns";
 import { listPersonIdsByTag, toggleTag } from "@/lib/person-tags";
 
@@ -493,6 +494,99 @@ describe("restoreRecipient", () => {
 
     const result = await restoreRecipient(testDb.db, campaignId, recipient.id);
     expect(result.restored).toBe(false);
+  });
+});
+
+describe("updateRecipientDraft", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+  });
+
+  async function seedDraftedRecipient() {
+    const [p] = await testDb.db
+      .insert(person)
+      .values({ name: "Nora" })
+      .returning();
+    await testDb.db.insert(contact).values({
+      personId: p.id,
+      source: "gmail",
+      sourceIdentifier: "nora@example.com",
+      displayName: "Nora",
+      status: "active",
+    });
+    const { campaignId } = await createCampaign(testDb.db, "Test", "goal", "https://example.com/study");
+    await addRecipients(testDb.db, campaignId, [{ personId: p.id }], "email");
+    const [recipient] = await testDb.db.select().from(campaignRecipient);
+    return { campaignId, recipient };
+  }
+
+  it("updates subject and body on a still-drafted recipient", async () => {
+    const { campaignId, recipient } = await seedDraftedRecipient();
+
+    const result = await updateRecipientDraft(testDb.db, campaignId, recipient.id, {
+      draftSubject: "Edited subject",
+      draftBody: "Edited body",
+    });
+
+    expect(result.updated).toBe(true);
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.id, recipient.id),
+    });
+    expect(row?.draftSubject).toBe("Edited subject");
+    expect(row?.draftBody).toBe("Edited body");
+  });
+
+  it("reports updated: false and leaves the row untouched once the recipient is no longer drafted", async () => {
+    const { campaignId, recipient } = await seedDraftedRecipient();
+    await testDb.db
+      .update(campaignRecipient)
+      .set({ status: "sent" })
+      .where(eq(campaignRecipient.id, recipient.id));
+
+    const result = await updateRecipientDraft(testDb.db, campaignId, recipient.id, {
+      draftSubject: "Should not apply",
+      draftBody: "Should not apply",
+    });
+
+    expect(result.updated).toBe(false);
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.id, recipient.id),
+    });
+    expect(row?.draftBody).not.toBe("Should not apply");
+  });
+
+  it("reports updated: false for the wrong campaignId", async () => {
+    const { recipient } = await seedDraftedRecipient();
+    const { campaignId: otherCampaignId } = await createCampaign(
+      testDb.db,
+      "Other",
+      "goal",
+      "https://example.com/study",
+    );
+
+    const result = await updateRecipientDraft(testDb.db, otherCampaignId, recipient.id, {
+      draftSubject: "x",
+      draftBody: "x",
+    });
+
+    expect(result.updated).toBe(false);
+  });
+
+  it("reports updated: false for a nonexistent recipient", async () => {
+    const { campaignId } = await seedDraftedRecipient();
+
+    const result = await updateRecipientDraft(testDb.db, campaignId, 999999, {
+      draftSubject: "x",
+      draftBody: "x",
+    });
+
+    expect(result.updated).toBe(false);
   });
 });
 

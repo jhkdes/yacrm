@@ -33,6 +33,7 @@ import {
   removeRecipient,
   restoreCampaign,
   restoreRecipient,
+  updateRecipientDraft,
 } from "@/lib/campaigns";
 import {
   markLinkedInRecipientSent,
@@ -802,6 +803,47 @@ export async function sendAllCampaignRecipientsAction(formData: FormData) {
   } catch (err) {
     console.error("Campaign bulk send failed", err);
     redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
+      err instanceof Error ? err.message : "unknown_error",
+    )}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+export async function updateCampaignRecipientDraftAction(formData: FormData) {
+  const campaignId = Number(formData.get("campaignId"));
+  const recipientId = Number(formData.get("recipientId"));
+  const channel = formData.get("channel");
+  const subject = formData.get("subject");
+  const body = formData.get("body");
+
+  const returnUrl =
+    channel === "linkedin"
+      ? `/campaigns/${campaignId}/linkedin-queue`
+      : `/campaigns/${campaignId}`;
+
+  if (
+    !Number.isInteger(campaignId) ||
+    !Number.isInteger(recipientId) ||
+    !isCampaignChannel(channel) ||
+    typeof body !== "string" ||
+    !body.trim()
+  ) {
+    redirect(`${returnUrl}?error=invalid_draft_edit_request`);
+  }
+
+  let redirectTarget: string;
+  try {
+    const { updated } = await updateRecipientDraft(db, campaignId, recipientId, {
+      draftSubject: typeof subject === "string" ? subject : "",
+      draftBody: body as string,
+    });
+    redirectTarget = updated
+      ? `${returnUrl}?draft_updated=1`
+      : `${returnUrl}?error=draft_no_longer_editable`;
+  } catch (err) {
+    console.error("Updating campaign recipient draft failed", err);
+    redirectTarget = `${returnUrl}?error=${encodeURIComponent(
       err instanceof Error ? err.message : "unknown_error",
     )}`;
   }

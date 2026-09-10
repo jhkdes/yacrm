@@ -219,6 +219,37 @@ export async function restoreRecipient(
   return { restored: updated.length > 0 };
 }
 
+// Lets the user fix up a generated draft before it goes out. Restricted to
+// `status = 'drafted'` rows — the WHERE clause is the enforcement point:
+// once a recipient has moved past drafted (sent, or advanced by a click —
+// see markLinkedInRecipientSent's comment on why that can happen before an
+// explicit send too), the message already went out for real, so editing
+// draftBody at that point wouldn't change anything and would be misleading
+// to show as live. Matches zero rows (and so reports `updated: false`)
+// rather than throwing, so a stale tab that raced an actual send just
+// fails quietly instead of erroring.
+export async function updateRecipientDraft(
+  db: DrizzleDb,
+  campaignId: number,
+  recipientId: number,
+  draft: { draftSubject: string; draftBody: string },
+): Promise<{ updated: boolean }> {
+  const updated = await db
+    .update(campaignRecipient)
+    .set({ draftSubject: draft.draftSubject, draftBody: draft.draftBody })
+    .where(
+      and(
+        eq(campaignRecipient.id, recipientId),
+        eq(campaignRecipient.campaignId, campaignId),
+        eq(campaignRecipient.status, "drafted"),
+        isNull(campaignRecipient.deletedAt),
+      ),
+    )
+    .returning({ id: campaignRecipient.id });
+
+  return { updated: updated.length > 0 };
+}
+
 // Soft-deletes a Campaign — its recipients are left untouched and simply
 // become unreachable through it until restoreCampaign brings it back.
 // Reversible; nothing is actually deleted.

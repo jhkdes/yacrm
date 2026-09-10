@@ -1,6 +1,10 @@
 import { notFound } from "next/navigation";
 
-import { markLinkedinRecipientSentAction } from "@/app/actions";
+import {
+  markLinkedinRecipientSentAction,
+  updateCampaignRecipientDraftAction,
+} from "@/app/actions";
+import { SubmitButton } from "@/app/_components/SubmitButton";
 import { db } from "@/db/client";
 import { LINKEDIN_SENDABLE_STATUSES } from "@/lib/campaign-send";
 
@@ -16,7 +20,7 @@ export default async function LinkedInQueuePage({
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ sent?: string; error?: string }>;
+  searchParams: Promise<{ sent?: string; draft_updated?: string; error?: string }>;
 }) {
   const { id } = await params;
   const campaignId = Number(id);
@@ -59,6 +63,9 @@ export default async function LinkedInQueuePage({
         <p style={{ color: "crimson" }}>Failed: {query.error}</p>
       )}
       {query.sent && <p style={{ color: "green" }}>Marked sent.</p>}
+      {query.draft_updated && (
+        <p style={{ color: "green" }}>Draft updated.</p>
+      )}
 
       {campaign.recipients.length === 0 ? (
         <p>
@@ -87,17 +94,41 @@ export default async function LinkedInQueuePage({
                   Open LinkedIn profile
                 </a>
               </p>
-              <p
-                style={{
-                  whiteSpace: "pre-wrap",
-                  color: "#333",
-                  border: "1px solid #eee",
-                  borderRadius: 4,
-                  padding: "0.75rem",
-                }}
-              >
-                {r.draftBody}
-              </p>
+              {r.status === "drafted" ? (
+                <form action={updateCampaignRecipientDraftAction}>
+                  <input type="hidden" name="campaignId" value={campaign.id} />
+                  <input type="hidden" name="recipientId" value={r.id} />
+                  <input type="hidden" name="channel" value="linkedin" />
+                  <p>
+                    <textarea
+                      name="body"
+                      defaultValue={r.draftBody}
+                      rows={8}
+                      style={{
+                        width: "100%",
+                        fontFamily: "inherit",
+                        border: "1px solid #eee",
+                        borderRadius: 4,
+                        padding: "0.75rem",
+                      }}
+                      required
+                    />
+                  </p>
+                  <SubmitButton idleLabel="Save changes" pendingLabel="Saving…" />
+                </form>
+              ) : (
+                <p
+                  style={{
+                    whiteSpace: "pre-wrap",
+                    color: "#333",
+                    border: "1px solid #eee",
+                    borderRadius: 4,
+                    padding: "0.75rem",
+                  }}
+                >
+                  {r.draftBody}
+                </p>
+              )}
               <CopyButton text={r.draftBody} />{" "}
               <form
                 action={markLinkedinRecipientSentAction}

@@ -6,7 +6,9 @@ import {
   restoreCampaignRecipientAction,
   sendAllCampaignRecipientsAction,
   sendCampaignRecipientAction,
+  updateCampaignRecipientDraftAction,
 } from "@/app/actions";
+import { SubmitButton } from "@/app/_components/SubmitButton";
 import { db } from "@/db/client";
 import { summarizeCampaign, type CampaignRecipientRow } from "@/lib/campaign-reporting";
 
@@ -41,6 +43,7 @@ export default async function CampaignDetailPage({
     sent_recipient?: string;
     sent_all?: string;
     sent_all_failed?: string;
+    draft_updated?: string;
     error?: string;
   }>;
 }) {
@@ -176,6 +179,9 @@ export default async function CampaignDetailPage({
             ` ${query.sent_all_failed} failed to send — see server logs.`}
         </p>
       )}
+      {query.draft_updated && (
+        <p style={{ color: "green" }}>Draft updated.</p>
+      )}
 
       <h2>Funnel</h2>
       <table style={{ borderCollapse: "collapse" }}>
@@ -250,10 +256,47 @@ export default async function CampaignDetailPage({
                 — {r.channel} via {r.contact.sourceIdentifier} — status{" "}
                 <strong>{r.status}</strong>
               </p>
-              {r.draftSubject && <p>Subject: {r.draftSubject}</p>}
-              <p style={{ whiteSpace: "pre-wrap", color: "#333" }}>
-                {r.draftBody}
-              </p>
+              {r.status === "drafted" ? (
+                <form action={updateCampaignRecipientDraftAction}>
+                  <input type="hidden" name="campaignId" value={campaign.id} />
+                  <input type="hidden" name="recipientId" value={r.id} />
+                  <input type="hidden" name="channel" value={r.channel} />
+                  {r.channel === "email" && (
+                    <p>
+                      <label>
+                        Subject:{" "}
+                        <input
+                          type="text"
+                          name="subject"
+                          defaultValue={r.draftSubject ?? ""}
+                          style={{ width: "100%" }}
+                        />
+                      </label>
+                    </p>
+                  )}
+                  <p>
+                    <label>
+                      Body:
+                      <br />
+                      <textarea
+                        name="body"
+                        defaultValue={r.draftBody}
+                        rows={10}
+                        style={{ width: "100%", fontFamily: "inherit" }}
+                        required
+                      />
+                    </label>
+                  </p>
+                  <SubmitButton idleLabel="Save changes" pendingLabel="Saving…" />
+                </form>
+              ) : (
+                <>
+                  {r.draftSubject && <p>Subject: {r.draftSubject}</p>}
+                  <p style={{ whiteSpace: "pre-wrap", color: "#333" }}>
+                    {r.draftBody}
+                  </p>
+                </>
+              )}
               {campaign.destinationUrl && (
                 <p style={{ fontSize: "0.9em" }}>
                   Tracked link:{" "}
