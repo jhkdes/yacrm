@@ -93,12 +93,17 @@ export function parseConnectionsCsv(csvText: string): {
 // finds the existing Contact via that identifier (no duplicate created).
 //
 // Each row's raw title/company is diffed against what's already stored on
-// the matched Person (`linkedinRawTitle`/`linkedinRawCompany`) — unchanged
-// rows are skipped entirely (no LLM call), changed or first-seen rows are
-// batched into classifyTitles (Phase 5/M28), which derives and persists a
-// standardized title, seniority, and function (see
-// docs/title-taxonomy.md). A row with no `position` at all has nothing to
-// classify and is left alone.
+// the matched Person (`linkedinRawTitle`/`linkedinRawCompany`) — a row only
+// counts as "unchanged" (skipped entirely, no LLM call) when those fields
+// match *and* `standardizedTitle` is already set; a match on raw fields
+// alone isn't enough, since a person whose raw fields got persisted but
+// never reached classification (e.g. an interrupted import) would
+// otherwise look identical to one that's actually done, and a later
+// re-import would skip them forever. Changed, first-seen, or
+// never-actually-classified rows are batched into classifyTitles (Phase
+// 5/M28), which derives and persists a standardized title, seniority, and
+// function (see docs/title-taxonomy.md). A row with no `position` at all
+// has nothing to classify and is left alone.
 //
 // findOrCreateContact still runs one row at a time (each row can create a
 // new Person, so there's no way around a per-row round-trip there), but the
@@ -143,6 +148,7 @@ export async function importLinkedInConnections(
       id: person.id,
       linkedinRawTitle: person.linkedinRawTitle,
       linkedinRawCompany: person.linkedinRawCompany,
+      standardizedTitle: person.standardizedTitle,
     })
     .from(person)
     .where(inArray(person.id, personIds));
@@ -152,8 +158,15 @@ export async function importLinkedInConnections(
 
   for (const { personId, position, company } of resolved) {
     const existing = existingById.get(personId);
+    // "Unchanged" must also mean "already classified" — otherwise a person
+    // whose raw title got persisted but never reached classification (e.g.
+    // an interrupted import) looks identical to one that's fully done, and
+    // a later re-import would skip them forever since their raw fields
+    // never change again.
     const unchanged =
-      existing?.linkedinRawTitle === position && existing?.linkedinRawCompany === company;
+      existing?.linkedinRawTitle === position &&
+      existing?.linkedinRawCompany === company &&
+      existing?.standardizedTitle !== null;
     if (unchanged) continue;
 
     await db

@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { contact, person } from "@/db/schema";
@@ -13,19 +14,32 @@ import { generateMergeSuggestions } from "@/lib/merge-suggestions";
 // mocking it here lets importLinkedInConnections' own DB logic (diff
 // detection, raw-field persistence, skip-if-unchanged) be exercised
 // without a real network call, the same tradeoff campaigns.test.ts makes
-// mocking generateDraftForPerson.
+// mocking generateDraftForPerson. The mock still writes standardizedTitle
+// back onto `person`, matching the real function's contract — the
+// skip-if-unchanged check depends on standardizedTitle being non-null to
+// tell "already classified" apart from "raw fields happen to match but
+// classification never actually ran" (see the real-import incident this
+// distinction was added for), so a mock that only returns values without
+// persisting them would make every test see everyone as unclassified.
 vi.mock("@/lib/title-extraction", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/title-extraction")>();
   return {
     ...actual,
-    classifyTitles: vi.fn(async (_db, rows) =>
-      rows.map((r: { personId: number }) => ({
+    classifyTitles: vi.fn(async (db, rows) => {
+      const results = rows.map((r: { personId: number }) => ({
         personId: r.personId,
         standardizedTitle: `Standardized ${r.personId}`,
         seniority: "ic",
         function: "other",
-      })),
-    ),
+      }));
+      for (const r of results) {
+        await db
+          .update(person)
+          .set({ standardizedTitle: r.standardizedTitle, seniority: r.seniority, function: r.function })
+          .where(eq(person.id, r.personId));
+      }
+      return results;
+    }),
   };
 });
 
@@ -166,6 +180,35 @@ describe("importLinkedInConnections", () => {
       where: (p, { eq }) => eq(p.id, charu!.personId),
     });
     expect(charuPerson?.linkedinRawTitle).toBe("VP of Product");
+  });
+
+  it("re-classifies a person whose raw title/company are unchanged but was never actually classified", async () => {
+    // Reproduces the real incident this check exists for: an earlier run
+    // persisted linkedinRawTitle/linkedinRawCompany but got interrupted
+    // before classification ran (e.g. a killed request), leaving
+    // standardizedTitle null. A naive "raw fields unchanged" skip would
+    // treat that person as done and never retry them.
+    const { rows } = parseConnectionsCsv(SAMPLE_EXPORT);
+    await importLinkedInConnections(testDb.db, rows);
+
+    const jeffrey = await testDb.db.query.contact.findFirst({
+      where: (c, { eq }) =>
+        eq(c.sourceIdentifier, "https://www.linkedin.com/in/goldbergjeffrey"),
+    });
+    await testDb.db
+      .update(person)
+      .set({ standardizedTitle: null, seniority: null, function: null })
+      .where(eq(person.id, jeffrey!.personId));
+
+    vi.clearAllMocks();
+    const second = await importLinkedInConnections(testDb.db, rows);
+
+    expect(second.titlesClassified).toBe(1);
+
+    const jeffreyPerson = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, jeffrey!.personId),
+    });
+    expect(jeffreyPerson?.standardizedTitle).not.toBeNull();
   });
 
   it("flows into the source-agnostic merge-suggestion engine like any other Contact", async () => {
