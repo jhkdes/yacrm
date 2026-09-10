@@ -1,19 +1,12 @@
-import {
-  importLinkedInConnectionsAction,
-  importLinkedInMessagesAction,
-} from "@/app/actions";
+import { importLinkedInMessagesAction } from "@/app/actions";
 
 import { ImportSubmitButton } from "./ImportSubmitButton";
+import { LinkedInConnectionsImportForm } from "./LinkedInConnectionsImportForm";
 
 export default async function ImportLinkedIn({
   searchParams,
 }: {
   searchParams: Promise<{
-    rows_processed?: string;
-    rows_skipped_no_url?: string;
-    contacts_created?: string;
-    titles_classified?: string;
-    import_error?: string;
     msg_rows_processed?: string;
     msg_rows_skipped_empty?: string;
     msg_rows_skipped_bad_date?: string;
@@ -39,25 +32,7 @@ export default async function ImportLinkedIn({
         <code> Connections.csv</code> below.
       </p>
 
-      <form action={importLinkedInConnectionsAction}>
-        <input type="file" name="file" accept=".csv" required />
-        <ImportSubmitButton />
-      </form>
-
-      {params.import_error && (
-        <p style={{ color: "crimson" }}>
-          Import failed: {params.import_error}
-        </p>
-      )}
-
-      {params.rows_processed && (
-        <ul>
-          <li>Rows processed: {params.rows_processed}</li>
-          <li>Rows skipped (no profile URL): {params.rows_skipped_no_url}</li>
-          <li>New contacts created: {params.contacts_created}</li>
-          <li>Titles classified: {params.titles_classified}</li>
-        </ul>
-      )}
+      <LinkedInConnectionsImportForm />
 
       <h1>Import LinkedIn messages</h1>
       <p>

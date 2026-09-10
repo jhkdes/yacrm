@@ -13,8 +13,13 @@ import { purgeContact, unpurgeIdentifier } from "@/lib/contact-purge";
 import { ImportSummary, importGmailHistory, syncGmailHistory } from "@/lib/gmail-import";
 import { approveAndSendDraft } from "@/lib/gmail-send";
 import {
+  assertRowCountAllowed,
+  computeBatchPlan,
+  CONNECTIONS_BATCH_SIZE,
   importLinkedInConnections,
+  type LinkedInImportSummary,
   parseConnectionsCsv,
+  TooManyRowsError,
 } from "@/lib/linkedin-import";
 import {
   importLinkedInMessages,
@@ -181,31 +186,62 @@ export async function syncGmailAction() {
   redirect(redirectTarget);
 }
 
-export async function importLinkedInConnectionsAction(formData: FormData) {
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) {
-    redirect("/import/linkedin?import_error=missing_file");
-  }
+export type LinkedInBatchResult =
+  | { ok: false; error: "too_many_rows"; rowCount: number; message: string }
+  | { ok: false; error: "unknown"; message: string; batchIndex: number }
+  | {
+      ok: true;
+      batchIndex: number;
+      totalBatches: number;
+      totalRows: number;
+      rowsSkippedNoUrl: number;
+      summary: LinkedInImportSummary;
+    };
 
-  let redirectTarget: string;
+// Called directly by LinkedInConnectionsImportForm.tsx as a plain async
+// function (not via <form action>) — every other action in this file
+// redirects, but a redirect ends the interaction once, at the very end,
+// which can't show incremental progress across many batches. The client
+// reads the uploaded file to text once and calls this once per batch,
+// driving its own loop and progress state; this action re-parses the full
+// text and re-checks the row cap on every call rather than trusting an
+// earlier call already did it, since these are independent, statelessly
+// re-entrant requests. See linkedin-import.ts for why re-parsing per call
+// is cheap enough not to matter (pure, no I/O, fast even at 10k rows).
+export async function processLinkedInConnectionsBatchAction(
+  csvText: string,
+  batchIndex: number,
+): Promise<LinkedInBatchResult> {
   try {
-    const csvText = await (file as File).text();
     const { rows, rowsSkippedNoUrl } = parseConnectionsCsv(csvText);
-    const summary = await importLinkedInConnections(db, rows);
-    redirectTarget = `/import/linkedin?${new URLSearchParams({
-      rows_processed: String(summary.rowsProcessed),
-      rows_skipped_no_url: String(rowsSkippedNoUrl),
-      contacts_created: String(summary.contactsCreated),
-      titles_classified: String(summary.titlesClassified),
-    }).toString()}`;
-  } catch (err) {
-    console.error("LinkedIn connections import failed", err);
-    redirectTarget = `/import/linkedin?import_error=${encodeURIComponent(
-      err instanceof Error ? err.message : "unknown_error",
-    )}`;
-  }
+    assertRowCountAllowed(rows.length);
 
-  redirect(redirectTarget);
+    const { totalBatches } = computeBatchPlan(rows.length);
+    const start = batchIndex * CONNECTIONS_BATCH_SIZE;
+    const batchRows = rows.slice(start, start + CONNECTIONS_BATCH_SIZE);
+
+    const summary = await importLinkedInConnections(db, batchRows);
+
+    return {
+      ok: true,
+      batchIndex,
+      totalBatches,
+      totalRows: rows.length,
+      rowsSkippedNoUrl,
+      summary,
+    };
+  } catch (err) {
+    if (err instanceof TooManyRowsError) {
+      return { ok: false, error: "too_many_rows", rowCount: err.rowCount, message: err.message };
+    }
+    console.error("LinkedIn connections batch import failed", err);
+    return {
+      ok: false,
+      error: "unknown",
+      message: err instanceof Error ? err.message : "unknown_error",
+      batchIndex,
+    };
+  }
 }
 
 export async function importLinkedInMessagesAction(formData: FormData) {

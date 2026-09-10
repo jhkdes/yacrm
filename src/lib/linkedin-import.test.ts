@@ -4,8 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { contact, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
 import {
+  assertRowCountAllowed,
+  computeBatchPlan,
+  CONNECTIONS_BATCH_SIZE,
   importLinkedInConnections,
+  MAX_CONNECTIONS_ROWS,
   parseConnectionsCsv,
+  TooManyRowsError,
 } from "@/lib/linkedin-import";
 import { generateMergeSuggestions } from "@/lib/merge-suggestions";
 
@@ -105,6 +110,50 @@ describe("parseConnectionsCsv", () => {
 
   it("throws on a file with no recognizable header row", () => {
     expect(() => parseConnectionsCsv("not,a,linkedin,export\n1,2,3,4")).toThrow();
+  });
+});
+
+describe("computeBatchPlan", () => {
+  it("reports 1 batch for an empty file rather than 0", () => {
+    expect(computeBatchPlan(0)).toEqual({ totalBatches: 1 });
+  });
+
+  it("reports 1 batch for exactly one batch's worth of rows", () => {
+    expect(computeBatchPlan(CONNECTIONS_BATCH_SIZE)).toEqual({ totalBatches: 1 });
+  });
+
+  it("rounds up when rows spill one over a batch boundary", () => {
+    expect(computeBatchPlan(CONNECTIONS_BATCH_SIZE + 1)).toEqual({ totalBatches: 2 });
+  });
+
+  it("matches the requirement's own 1,920-row example (16 batches of 120)", () => {
+    expect(computeBatchPlan(16 * CONNECTIONS_BATCH_SIZE)).toEqual({ totalBatches: 16 });
+  });
+
+  it("computes the batch count at the max allowed row count", () => {
+    expect(computeBatchPlan(MAX_CONNECTIONS_ROWS)).toEqual({
+      totalBatches: Math.ceil(MAX_CONNECTIONS_ROWS / CONNECTIONS_BATCH_SIZE),
+    });
+  });
+});
+
+describe("assertRowCountAllowed", () => {
+  it("allows exactly the maximum row count", () => {
+    expect(() => assertRowCountAllowed(MAX_CONNECTIONS_ROWS)).not.toThrow();
+  });
+
+  it("rejects one row over the maximum, with the row count in the message", () => {
+    expect(() => assertRowCountAllowed(MAX_CONNECTIONS_ROWS + 1)).toThrow(TooManyRowsError);
+
+    let caught: unknown;
+    try {
+      assertRowCountAllowed(MAX_CONNECTIONS_ROWS + 1);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(TooManyRowsError);
+    expect((caught as TooManyRowsError).rowCount).toBe(MAX_CONNECTIONS_ROWS + 1);
+    expect((caught as Error).message).toContain(String(MAX_CONNECTIONS_ROWS + 1));
   });
 });
 
@@ -252,5 +301,61 @@ describe("importLinkedInConnections", () => {
           ),
       ),
     ).toBe(true);
+  });
+
+  it("produces the same end state whether rows arrive in one call or split across several (chunking is invariant)", async () => {
+    const { rows } = parseConnectionsCsv(SAMPLE_EXPORT);
+
+    // Split arbitrarily (not at CONNECTIONS_BATCH_SIZE, which is too large
+    // to exercise meaningfully against a 3-row fixture) — the property
+    // under test is that chunking itself doesn't change the outcome, which
+    // doesn't depend on the real batch size.
+    await importLinkedInConnections(testDb.db, rows.slice(0, 2));
+    await importLinkedInConnections(testDb.db, rows.slice(2));
+
+    const chunkedContacts = await testDb.db.query.contact.findMany({
+      where: (c, { eq }) => eq(c.source, "linkedin"),
+      orderBy: (c, { asc }) => asc(c.sourceIdentifier),
+    });
+    const chunkedPeople = await Promise.all(
+      chunkedContacts.map((c) =>
+        testDb.db.query.person.findFirst({ where: (p, { eq }) => eq(p.id, c.personId) }),
+      ),
+    );
+
+    const freshDb = await createTestDb();
+    try {
+      await importLinkedInConnections(freshDb.db, rows);
+      const singleShotContacts = await freshDb.db.query.contact.findMany({
+        where: (c, { eq }) => eq(c.source, "linkedin"),
+        orderBy: (c, { asc }) => asc(c.sourceIdentifier),
+      });
+      const singleShotPeople = await Promise.all(
+        singleShotContacts.map((c) =>
+          freshDb.db.query.person.findFirst({ where: (p, { eq }) => eq(p.id, c.personId) }),
+        ),
+      );
+
+      expect(chunkedContacts.map((c) => c.sourceIdentifier)).toEqual(
+        singleShotContacts.map((c) => c.sourceIdentifier),
+      );
+      expect(
+        chunkedPeople.map((p) => ({
+          linkedinRawTitle: p?.linkedinRawTitle,
+          standardizedTitle: p?.standardizedTitle,
+          seniority: p?.seniority,
+          function: p?.function,
+        })),
+      ).toEqual(
+        singleShotPeople.map((p) => ({
+          linkedinRawTitle: p?.linkedinRawTitle,
+          standardizedTitle: p?.standardizedTitle,
+          seniority: p?.seniority,
+          function: p?.function,
+        })),
+      );
+    } finally {
+      await freshDb.client.close();
+    }
   });
 });
