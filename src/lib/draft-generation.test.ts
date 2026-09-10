@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { contact, event, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
+import { USER_VOICE_EXAMPLES } from "@/lib/voice-examples";
 
 import {
   buildDraftPrompt,
@@ -199,14 +200,22 @@ describe("buildDraftPrompt", () => {
     expect(system).toContain("{{LINK}}");
   });
 
-  it("instructs the model to write in an informal, human founder voice instead of AI-slop", () => {
+  it("instructs the model to avoid AI-slop patterns", () => {
     const context = contextFor({});
     const { system } = buildDraftPrompt(context, "goal");
 
-    expect(system).toMatch(/informal.*founder/i);
     expect(system).toMatch(/throat-clearing/i);
-    expect(system).toMatch(/contractions/i);
     expect(system).toMatch(/buzzwords/i);
+  });
+
+  it("includes every real voice example verbatim, so the model matches the user's actual writing", () => {
+    const context = contextFor({});
+    const { system } = buildDraftPrompt(context, "goal");
+
+    expect(USER_VOICE_EXAMPLES.length).toBeGreaterThan(0);
+    for (const example of USER_VOICE_EXAMPLES) {
+      expect(system).toContain(example);
+    }
   });
 });
 
