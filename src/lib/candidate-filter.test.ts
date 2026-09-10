@@ -2,12 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { contact, event, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
-import {
-  buildCandidateSortUrl,
-  filterCandidates,
-  sortFilterResults,
-  type FilterResult,
-} from "@/lib/candidate-filter";
+import { filterCandidates, sortFilterResults, type FilterResult } from "@/lib/candidate-filter";
 
 describe("filterCandidates", () => {
   let testDb: Awaited<ReturnType<typeof createTestDb>>;
@@ -237,79 +232,5 @@ describe("sortFilterResults", () => {
     const original = [...results];
     sortFilterResults(results, "name", "asc");
     expect(results).toEqual(original);
-  });
-});
-
-describe("buildCandidateSortUrl", () => {
-  it("always includes title, even when empty — regression for a real bug", () => {
-    // A filter submitted with no title text (checkboxes only, or no
-    // criteria at all) has title === "". The page's shouldFilter check
-    // depends on title's *presence* in the URL, not its truthiness —
-    // dropping it here made the whole results section vanish on sort.
-    const url = buildCandidateSortUrl(
-      { title: "", seniority: [], function: [], industry: [] },
-      "name",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.has("title")).toBe(true);
-    expect(params.get("title")).toBe("");
-  });
-
-  it("preserves seniority/function/industry as repeated keys", () => {
-    const url = buildCandidateSortUrl(
-      { title: "pm", seniority: ["director", "vp"], function: ["engineering"], industry: [] },
-      "company",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.getAll("seniority")).toEqual(["director", "vp"]);
-    expect(params.getAll("function")).toEqual(["engineering"]);
-  });
-
-  it("sets sort to the requested field and defaults dir to asc", () => {
-    const url = buildCandidateSortUrl(
-      { title: "", seniority: [], function: [], industry: [] },
-      "lastInteraction",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.get("sort")).toBe("lastInteraction");
-    expect(params.get("dir")).toBe("asc");
-  });
-
-  it("toggles dir to desc on a second click of the already-active column", () => {
-    const url = buildCandidateSortUrl(
-      { title: "", seniority: [], function: [], industry: [], currentSort: "name", currentDir: "asc" },
-      "name",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.get("dir")).toBe("desc");
-  });
-
-  it("toggles back to asc on a third click", () => {
-    const url = buildCandidateSortUrl(
-      { title: "", seniority: [], function: [], industry: [], currentSort: "name", currentDir: "desc" },
-      "name",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.get("dir")).toBe("asc");
-  });
-
-  it("resets to asc when switching to a different column", () => {
-    const url = buildCandidateSortUrl(
-      { title: "", seniority: [], function: [], industry: [], currentSort: "name", currentDir: "desc" },
-      "company",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.get("sort")).toBe("company");
-    expect(params.get("dir")).toBe("asc");
-  });
-
-  it("carries goal and campaignId through when present", () => {
-    const url = buildCandidateSortUrl(
-      { title: "", seniority: [], function: [], industry: [], goal: "hiring PMs", campaignId: 42 },
-      "name",
-    );
-    const params = new URL(url, "http://localhost").searchParams;
-    expect(params.get("goal")).toBe("hiring PMs");
-    expect(params.get("campaignId")).toBe("42");
   });
 });

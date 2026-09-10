@@ -391,16 +391,9 @@ export default async function CampaignsPage({
                 targetCampaign={
                   targetCampaign ? { id: targetCampaign.id, name: targetCampaign.name } : null
                 }
-                sortUrlParams={{
-                  title: params.title,
-                  seniority: seniorityValues,
-                  function: functionValues,
-                  industry: industryValues,
-                  goal: params.goal,
-                  campaignId: targetCampaignId,
-                  currentSort: params.sort,
-                  currentDir: params.dir,
-                }}
+                goal={params.goal}
+                initialSort={isSortField(params.sort) ? params.sort : undefined}
+                initialDir={params.dir === "desc" ? "desc" : "asc"}
               />
             </>
           )}

@@ -152,36 +152,3 @@ export function sortFilterResults(
   return sorted;
 }
 
-export interface CandidateSortUrlParams {
-  title?: string;
-  seniority: string[];
-  function: string[];
-  industry: string[];
-  goal?: string;
-  campaignId?: number | null;
-  currentSort?: string;
-  currentDir?: string;
-}
-
-// Pure — extracted from campaigns/page.tsx specifically so this class of
-// bug is unit-testable: a real regression had `title` only included in the
-// rebuilt URL when truthy, which silently dropped it whenever a filter had
-// been submitted with an empty title (checkboxes only, or no criteria at
-// all). The page's shouldFilter check depends on `title`'s *presence* in
-// the URL, not its truthiness — omitting it entirely made the whole
-// results section (table included) disappear on the very next sort click.
-// `title` must always be set, even to "".
-export function buildCandidateSortUrl(params: CandidateSortUrlParams, field: SortField): string {
-  const usp = new URLSearchParams();
-  usp.set("title", params.title ?? "");
-  for (const v of params.seniority) usp.append("seniority", v);
-  for (const v of params.function) usp.append("function", v);
-  for (const v of params.industry) usp.append("industry", v);
-  if (params.goal) usp.set("goal", params.goal);
-  if (params.campaignId) usp.set("campaignId", String(params.campaignId));
-  const isActive = params.currentSort === field;
-  const nextDir = isActive && params.currentDir !== "desc" ? "desc" : "asc";
-  usp.set("sort", field);
-  usp.set("dir", nextDir);
-  return `/campaigns?${usp.toString()}`;
-}

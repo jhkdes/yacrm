@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { processCampaignRecipientsBatchAction } from "@/app/actions";
-import { buildCandidateSortUrl, type FilterResult, type SortField } from "@/lib/candidate-filter";
+import { sortFilterResults, type FilterResult, type SortField } from "@/lib/candidate-filter";
 
 import { CandidateDrawerTrigger } from "./CandidateDrawerTrigger";
 
@@ -13,16 +13,12 @@ const CAMPAIGN_RECIPIENT_BATCH_SIZE = 2;
 interface CampaignRecipientsFormProps {
   results: FilterResult[];
   targetCampaign: { id: number; name: string } | null;
-  sortUrlParams: {
-    title?: string;
-    seniority: string[];
-    function: string[];
-    industry: string[];
-    goal?: string;
-    campaignId: number | null;
-    currentSort?: string;
-    currentDir?: string;
-  };
+  goal?: string;
+  // Only seeds the initial arrow/order (e.g. a bookmarked URL with sort
+  // params already in it) — every click after that re-sorts client-side,
+  // see the note on `sort` state below for why.
+  initialSort?: SortField;
+  initialDir?: "asc" | "desc";
 }
 
 type State =
@@ -68,18 +64,35 @@ const SORT_FIELDS: { field: SortField; label: string }[] = [
 export function CampaignRecipientsForm({
   results,
   targetCampaign,
-  sortUrlParams,
+  goal,
+  initialSort,
+  initialDir,
 }: CampaignRecipientsFormProps) {
   const router = useRouter();
   const [state, setState] = useState<State>({ phase: "idle" });
+  // Sorting a column used to be a plain link to a new URL — a full page
+  // navigation, which silently discarded whatever the user had typed into
+  // the campaign name/goal/destination fields below (a real bug report:
+  // sorting mid-way through filling out the form wiped that text). Sorting
+  // the already-loaded `results` client-side instead means no navigation
+  // ever happens, so nothing in the form below can be reset by it.
+  const [sort, setSort] = useState<{ field: SortField; dir: "asc" | "desc" } | null>(
+    initialSort ? { field: initialSort, dir: initialDir === "desc" ? "desc" : "asc" } : null,
+  );
 
-  function buildSortUrl(field: SortField): string {
-    return buildCandidateSortUrl(sortUrlParams, field);
+  const displayedResults = sort ? sortFilterResults(results, sort.field, sort.dir) : results;
+
+  function handleSortClick(field: SortField) {
+    setSort((prev) => {
+      const isActive = prev?.field === field;
+      const nextDir = isActive && prev.dir !== "desc" ? "desc" : "asc";
+      return { field, dir: nextDir };
+    });
   }
 
   function sortIndicator(field: SortField): string {
-    if (sortUrlParams.currentSort !== field) return "";
-    return sortUrlParams.currentDir === "desc" ? " ▼" : " ▲";
+    if (sort?.field !== field) return "";
+    return sort.dir === "desc" ? " ▼" : " ▲";
   }
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -186,17 +199,29 @@ export function CampaignRecipientsForm({
               <th></th>
               {SORT_FIELDS.map(({ field, label }) => (
                 <th key={field} style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                  <a href={buildSortUrl(field)}>
+                  <button
+                    type="button"
+                    onClick={() => handleSortClick(field)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      padding: 0,
+                      font: "inherit",
+                      color: "#06c",
+                      textDecoration: "underline",
+                      cursor: "pointer",
+                    }}
+                  >
                     {label}
                     {sortIndicator(field)}
-                  </a>
+                  </button>
                 </th>
               ))}
               <th></th>
             </tr>
           </thead>
           <tbody>
-            {results.map((r) => (
+            {displayedResults.map((r) => (
               <tr key={r.personId} style={{ borderTop: "1px solid #eee" }}>
                 <td style={{ padding: "0.25rem 0.5rem" }}>
                   <input type="checkbox" name="personIds" value={r.personId} disabled={isRunning} />
@@ -251,7 +276,7 @@ export function CampaignRecipientsForm({
               <input
                 type="text"
                 name="goal"
-                defaultValue={sortUrlParams.goal ?? ""}
+                defaultValue={goal ?? ""}
                 placeholder="e.g. inviting them to try our AI interview study"
                 style={{ width: "28rem" }}
                 required
