@@ -1,12 +1,33 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { contact, event, person } from "@/db/schema";
+import { contact, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
 import {
   importLinkedInConnections,
   parseConnectionsCsv,
 } from "@/lib/linkedin-import";
 import { generateMergeSuggestions } from "@/lib/merge-suggestions";
+
+// classifyTitles' full pipeline calls the real Anthropic API and is
+// deliberately left untested at that layer (see title-extraction.ts) —
+// mocking it here lets importLinkedInConnections' own DB logic (diff
+// detection, raw-field persistence, skip-if-unchanged) be exercised
+// without a real network call, the same tradeoff campaigns.test.ts makes
+// mocking generateDraftForPerson.
+vi.mock("@/lib/title-extraction", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/title-extraction")>();
+  return {
+    ...actual,
+    classifyTitles: vi.fn(async (_db, rows) =>
+      rows.map((r: { personId: number }) => ({
+        personId: r.personId,
+        standardizedTitle: `Standardized ${r.personId}`,
+        seniority: "ic",
+        function: "other",
+      })),
+    ),
+  };
+});
 
 const SAMPLE_EXPORT = `Notes:
 "When exporting your connection data, you may notice that some of the email addresses are missing. You will only see email addresses for connections who have allowed their connections to see or download their email address using this setting https://www.linkedin.com/psettings/privacy/email. You can learn more here https://www.linkedin.com/help/linkedin/answer/261"
@@ -78,36 +99,19 @@ describe("importLinkedInConnections", () => {
 
   beforeEach(async () => {
     testDb = await createTestDb();
-    // Stub the Voyage embeddings call the same way gmail-import's tests do —
-    // real network calls have no place in a unit/integration test.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(async (_url, options) => {
-        const body = JSON.parse(options.body);
-        return {
-          ok: true,
-          json: async () => ({
-            data: body.input.map((_text: string, index: number) => ({
-              embedding: Array(512).fill(0),
-              index,
-            })),
-          }),
-        };
-      }),
-    );
   });
 
   afterEach(async () => {
-    vi.unstubAllGlobals();
+    vi.clearAllMocks();
     await testDb.client.close();
   });
 
-  it("creates one active Contact per connection, with a profile Event", async () => {
+  it("creates one active Contact per connection, and stores raw title/company on their Person", async () => {
     const { rows } = parseConnectionsCsv(SAMPLE_EXPORT);
     const summary = await importLinkedInConnections(testDb.db, rows);
 
     expect(summary.contactsCreated).toBe(3);
-    expect(summary.profileEventsWritten).toBe(3);
+    expect(summary.titlesClassified).toBe(3);
 
     const contacts = await testDb.db.query.contact.findMany({
       where: (c, { eq }) => eq(c.source, "linkedin"),
@@ -118,44 +122,50 @@ describe("importLinkedInConnections", () => {
     const jeffrey = contacts.find(
       (c) => c.sourceIdentifier === "https://www.linkedin.com/in/goldbergjeffrey",
     );
-    const jeffreyEvent = await testDb.db.query.event.findFirst({
-      where: (e, { eq }) => eq(e.contactId, jeffrey!.id),
+    const jeffreyPerson = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, jeffrey!.personId),
     });
-    expect(jeffreyEvent?.bodyText).toBe(
-      "Director of Product Management - Cloud Platform, Integration, Embedded and API Strategy at Qlik",
+    expect(jeffreyPerson?.linkedinRawTitle).toBe(
+      "Director of Product Management - Cloud Platform, Integration, Embedded and API Strategy",
     );
+    expect(jeffreyPerson?.linkedinRawCompany).toBe("Qlik");
   });
 
-  it("is idempotent: re-importing the same rows doesn't duplicate Contacts or Events", async () => {
+  it("is idempotent: re-importing the same rows doesn't duplicate Contacts or re-classify", async () => {
     const { rows } = parseConnectionsCsv(SAMPLE_EXPORT);
     await importLinkedInConnections(testDb.db, rows);
+    vi.clearAllMocks();
     const second = await importLinkedInConnections(testDb.db, rows);
 
     expect(second.contactsCreated).toBe(0);
+    // Nothing changed since the first import, so no row should have been
+    // queued for (re-)classification.
+    expect(second.titlesClassified).toBe(0);
 
     const contacts = await testDb.db.select().from(contact);
-    const events = await testDb.db.select().from(event);
     expect(contacts).toHaveLength(3);
-    expect(events).toHaveLength(3);
   });
 
-  it("updates the profile Event body when a re-import shows a new position", async () => {
+  it("re-classifies only the rows whose raw title/company changed on re-import", async () => {
     const { rows } = parseConnectionsCsv(SAMPLE_EXPORT);
     await importLinkedInConnections(testDb.db, rows);
+    vi.clearAllMocks();
 
     const updatedRows = rows.map((r) =>
       r.firstName === "Charu" ? { ...r, position: "VP of Product" } : r,
     );
-    await importLinkedInConnections(testDb.db, updatedRows);
+    const second = await importLinkedInConnections(testDb.db, updatedRows);
+
+    expect(second.titlesClassified).toBe(1);
 
     const charu = await testDb.db.query.contact.findFirst({
       where: (c, { eq }) =>
         eq(c.sourceIdentifier, "https://www.linkedin.com/in/charu-technologyleader"),
     });
-    const charuEvent = await testDb.db.query.event.findFirst({
-      where: (e, { eq }) => eq(e.contactId, charu!.id),
+    const charuPerson = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, charu!.personId),
     });
-    expect(charuEvent?.bodyText).toBe("VP of Product at Enertia Software");
+    expect(charuPerson?.linkedinRawTitle).toBe("VP of Product");
   });
 
   it("flows into the source-agnostic merge-suggestion engine like any other Contact", async () => {

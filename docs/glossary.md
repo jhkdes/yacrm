@@ -71,6 +71,26 @@ The most recent of a Person's meetings, inbound Events, and outbound Events — 
 **Tag**
 A user-applied label on a Person (`person_tag`), used to hand-curate an audience for a Campaign (currently only the Phase 4 `intro` outreach track) rather than relying on semantic ranking.
 
+## Campaign targeting (Phase 5)
+
+**Structured filter**
+A deterministic query over a Person's Standardized title / Seniority / Function / Industry fields, used to select Campaign candidates. Replaces semantic (embedding-similarity) ranking for targeting — see [outreach-roadmap.md](./outreach-roadmap.md) Phase 5. A Campaign's free-text goal is not itself the filter; an LLM drafts a proposed Structured filter from the goal text, which the user reviews and edits before it runs.
+
+**Standardized title**
+A short, canonical job-title string an LLM derives from a Person's raw LinkedIn `Position` text at import time (e.g. "Director of Product Management" from "Director of Product Management - Cloud Platform, Integration, Embedded and API Strategy"). Freeform display text, not one of the fixed enums — see [title-taxonomy.md](./title-taxonomy.md).
+
+**Seniority**
+One fixed value (`ic`, `manager`, `director`, `vp`, `c_level`, `founder`, or `unknown`) an LLM assigns per Person from their raw title at LinkedIn import time. Defined in [title-taxonomy.md](./title-taxonomy.md).
+
+**Function**
+One fixed value (e.g. `product_management`, `engineering`, `sales`, or `other`) an LLM assigns per Person from their raw title at LinkedIn import time, alongside Seniority. Defined in [title-taxonomy.md](./title-taxonomy.md).
+
+**Industry**
+One fixed value (e.g. `tech_enterprise_software`, `financial_services`, or `unknown`) an LLM infers once per rule-normalized company name — not per Person — and caches for every Person at that company. Defined in [industry-taxonomy.md](./industry-taxonomy.md). Company headcount is deliberately *not* inferred or tracked (too volatile to infer reliably from a company name alone).
+
+**Normalized company name**
+A company name with common legal suffixes stripped ("Inc.", "LLC", "Corp.", "Ltd.", "GmbH", etc.) via a fixed rule, used as the cache key for Industry inference. Deliberately *not* fuzzy-merged beyond suffix-stripping — e.g. "Amazon" and "AWS" stay distinct entries rather than risk conflating different entities under a similarity heuristic.
+
 ---
 
 *Terms are added here as new milestones introduce them — see the technical design doc for which milestone owns which term.*

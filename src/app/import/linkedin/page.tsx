@@ -10,8 +10,7 @@ export default async function ImportLinkedIn({
     rows_processed?: string;
     rows_skipped_no_url?: string;
     contacts_created?: string;
-    profile_events_written?: string;
-    events_embedded?: string;
+    titles_classified?: string;
     import_error?: string;
     msg_rows_processed?: string;
     msg_rows_skipped_empty?: string;
@@ -54,8 +53,7 @@ export default async function ImportLinkedIn({
           <li>Rows processed: {params.rows_processed}</li>
           <li>Rows skipped (no profile URL): {params.rows_skipped_no_url}</li>
           <li>New contacts created: {params.contacts_created}</li>
-          <li>Profile events written: {params.profile_events_written}</li>
-          <li>Events embedded: {params.events_embedded}</li>
+          <li>Titles classified: {params.titles_classified}</li>
         </ul>
       )}
 

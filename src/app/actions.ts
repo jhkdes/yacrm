@@ -196,8 +196,7 @@ export async function importLinkedInConnectionsAction(formData: FormData) {
       rows_processed: String(summary.rowsProcessed),
       rows_skipped_no_url: String(rowsSkippedNoUrl),
       contacts_created: String(summary.contactsCreated),
-      profile_events_written: String(summary.profileEventsWritten),
-      events_embedded: String(summary.eventsEmbedded),
+      titles_classified: String(summary.titlesClassified),
     }).toString()}`;
   } catch (err) {
     console.error("LinkedIn connections import failed", err);

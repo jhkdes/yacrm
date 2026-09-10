@@ -57,6 +57,69 @@ export const contactStatusEnum = pgEnum("contact_status", [
   "active",
 ]);
 
+// Phase 5 (M28): fixed taxonomy for LLM-classified LinkedIn title data —
+// see docs/title-taxonomy.md, the canonical source these values must match.
+// "unknown" means the classifier tried and couldn't confidently place the
+// title (see the ambiguity rule in that doc) — distinct from the *column*
+// being null, which means no LinkedIn title has ever been classified at all.
+export const personSeniorityEnum = pgEnum("person_seniority", [
+  "ic",
+  "manager",
+  "director",
+  "vp",
+  "c_level",
+  "founder",
+  "unknown",
+]);
+
+export const personFunctionEnum = pgEnum("person_function", [
+  "product_management",
+  "product_marketing",
+  "engineering",
+  "design",
+  "data_analytics",
+  "sales",
+  "marketing",
+  "customer_success",
+  "operations",
+  "finance",
+  "people_hr",
+  "legal",
+  "it",
+  "executive_general",
+  "other",
+]);
+
+// Phase 5 (M29): fixed taxonomy for LLM-inferred company industry — see
+// docs/industry-taxonomy.md, the canonical source these values must match.
+export const companyIndustryEnum = pgEnum("company_industry", [
+  "tech_enterprise_software",
+  "tech_dev_tools_infra",
+  "tech_cybersecurity",
+  "tech_fintech",
+  "tech_healthtech",
+  "tech_edtech",
+  "tech_martech_adtech",
+  "tech_consumer_software",
+  "tech_gaming",
+  "tech_hardware_semiconductors",
+  "telecommunications",
+  "financial_services",
+  "healthcare",
+  "retail_ecommerce",
+  "manufacturing_industrial",
+  "media_entertainment",
+  "professional_services",
+  "education",
+  "government_public_sector",
+  "nonprofit",
+  "real_estate",
+  "transportation_logistics",
+  "energy_utilities",
+  "other",
+  "unknown",
+]);
+
 // An authenticated mailbox connection (Gmail today, Hotmail later) used to
 // import mail and, eventually, send outreach. Not a Contact/Person — this is
 // *your* mailbox, not someone you're tracking.
@@ -111,6 +174,19 @@ export const person = pgTable("person", {
   summaryEmbedding: vector("summary_embedding", {
     dimensions: EMBEDDING_DIMENSIONS,
   }),
+  // Phase 5 (M28): raw LinkedIn Position/Company text as last imported, kept
+  // specifically so re-import can diff against it and skip re-classifying
+  // unchanged rows. Null means this Person has never had a LinkedIn
+  // connections row imported (or predates M28).
+  linkedinRawTitle: text("linkedin_raw_title"),
+  linkedinRawCompany: text("linkedin_raw_company"),
+  // LLM-derived from linkedinRawTitle at import time — see
+  // docs/title-taxonomy.md. standardizedTitle is freeform display text;
+  // seniority/function are the fixed taxonomy enums. All three are null
+  // together (never classified) or set together (classification ran).
+  standardizedTitle: text("standardized_title"),
+  seniority: personSeniorityEnum("seniority"),
+  function: personFunctionEnum("function"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),

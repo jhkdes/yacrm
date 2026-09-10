@@ -1,10 +1,13 @@
 import { parse } from "csv-parse/sync";
+import { eq, inArray } from "drizzle-orm";
 
-import { event } from "@/db/schema";
+import { person } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
 import { findOrCreateContact } from "@/lib/contact-resolution";
-import { generateEmbeddings } from "@/lib/embeddings";
-import { updatePersonSummaryEmbedding } from "@/lib/person-embedding";
+import {
+  classifyTitles,
+  type TitleClassificationInput,
+} from "@/lib/title-extraction";
 
 export interface LinkedInConnectionRow {
   firstName: string;
@@ -20,8 +23,7 @@ export interface LinkedInImportSummary {
   rowsProcessed: number;
   rowsSkippedNoUrl: number;
   contactsCreated: number;
-  profileEventsWritten: number;
-  eventsEmbedded: number;
+  titlesClassified: number;
 }
 
 const HEADER_MARKER = "First Name,Last Name,URL";
@@ -86,23 +88,23 @@ export function parseConnectionsCsv(csvText: string): {
   return { rows, rowsSkippedNoUrl };
 }
 
-function buildProfileBodyText(row: LinkedInConnectionRow): string | null {
-  if (!row.position && !row.company) return null;
-  if (row.position && row.company) {
-    return `${row.position} at ${row.company}`;
-  }
-  return row.position ?? row.company;
-}
-
 // Imports a parsed connections list: one Contact per row (source
-// "linkedin", identifier = profile URL), plus a synthetic profile Event
-// carrying their current position/company. The profile Event exists purely
-// so role-based campaign targeting (Phase 2) has something to embed and
-// rank against — a LinkedIn connection with no message history otherwise
-// contributes nothing to their Person's summary embedding. Re-importing the
-// same connection updates that Event in place (matched on a stable
-// per-profile sourceMessageId) rather than duplicating it, so a refreshed
-// export just picks up role changes.
+// "linkedin", identifier = profile URL). Re-importing the same connection
+// finds the existing Contact via that identifier (no duplicate created).
+//
+// Each row's raw title/company is diffed against what's already stored on
+// the matched Person (`linkedinRawTitle`/`linkedinRawCompany`) — unchanged
+// rows are skipped entirely (no LLM call), changed or first-seen rows are
+// batched into classifyTitles (Phase 5/M28), which derives and persists a
+// standardized title, seniority, and function (see
+// docs/title-taxonomy.md). A row with no `position` at all has nothing to
+// classify and is left alone.
+//
+// findOrCreateContact still runs one row at a time (each row can create a
+// new Person, so there's no way around a per-row round-trip there), but the
+// diff check is batched into a single query across every resolved Person
+// instead of one `findFirst` per row — with a real ~1,850-row export this
+// was the difference between ~1,850 sequential DB round-trips and 1.
 export async function importLinkedInConnections(
   db: DrizzleDb,
   rows: LinkedInConnectionRow[],
@@ -111,13 +113,10 @@ export async function importLinkedInConnections(
     rowsProcessed: rows.length,
     rowsSkippedNoUrl: 0,
     contactsCreated: 0,
-    profileEventsWritten: 0,
-    eventsEmbedded: 0,
+    titlesClassified: 0,
   };
 
-  const toEmbed: { contactId: number; bodyText: string; occurredAt: Date }[] =
-    [];
-  const affectedPersonIds = new Set<number>();
+  const resolved: { personId: number; position: string; company: string | null }[] = [];
 
   for (const row of rows) {
     const name = `${row.firstName} ${row.lastName}`.trim() || null;
@@ -130,55 +129,55 @@ export async function importLinkedInConnections(
       "active",
     );
     if (result.wasCreated) summary.contactsCreated += 1;
-    affectedPersonIds.add(result.personId);
 
-    const bodyText = buildProfileBodyText(row);
-    if (bodyText) {
-      toEmbed.push({
-        contactId: result.contactId,
-        bodyText,
-        occurredAt: row.connectedOn ?? new Date(),
-      });
+    if (row.position) {
+      resolved.push({ personId: result.personId, position: row.position, company: row.company });
     }
   }
 
-  let embeddings: (number[] | null)[] = toEmbed.map(() => null);
-  try {
-    embeddings = await generateEmbeddings(toEmbed.map((e) => e.bodyText));
-  } catch (err) {
-    console.warn(
-      "[linkedin-import] embedding generation failed, continuing without embeddings",
-      err,
-    );
-  }
+  if (resolved.length === 0) return summary;
 
-  for (const [index, entry] of toEmbed.entries()) {
-    const embedding = embeddings[index] ?? null;
+  const personIds = [...new Set(resolved.map((r) => r.personId))];
+  const existingPeople = await db
+    .select({
+      id: person.id,
+      linkedinRawTitle: person.linkedinRawTitle,
+      linkedinRawCompany: person.linkedinRawCompany,
+    })
+    .from(person)
+    .where(inArray(person.id, personIds));
+  const existingById = new Map(existingPeople.map((p) => [p.id, p]));
+
+  const toClassify: TitleClassificationInput[] = [];
+
+  for (const { personId, position, company } of resolved) {
+    const existing = existingById.get(personId);
+    const unchanged =
+      existing?.linkedinRawTitle === position && existing?.linkedinRawCompany === company;
+    if (unchanged) continue;
+
     await db
-      .insert(event)
-      .values({
-        contactId: entry.contactId,
-        direction: "inbound",
-        occurredAt: entry.occurredAt,
-        subject: "LinkedIn profile",
-        bodyText: entry.bodyText,
-        sourceMessageId: `linkedin-profile:${entry.contactId}`,
-        embedding,
+      .update(person)
+      .set({
+        linkedinRawTitle: position,
+        linkedinRawCompany: company,
+        updatedAt: new Date(),
       })
-      .onConflictDoUpdate({
-        target: [event.contactId, event.sourceMessageId],
-        set: {
-          bodyText: entry.bodyText,
-          occurredAt: entry.occurredAt,
-          embedding,
-        },
-      });
-    summary.profileEventsWritten += 1;
-    if (embedding) summary.eventsEmbedded += 1;
+      .where(eq(person.id, personId));
+
+    toClassify.push({ personId, rawTitle: position, rawCompany: company });
   }
 
-  for (const personId of affectedPersonIds) {
-    await updatePersonSummaryEmbedding(db, personId);
+  if (toClassify.length > 0) {
+    try {
+      const classified = await classifyTitles(db, toClassify);
+      summary.titlesClassified = classified.length;
+    } catch (err) {
+      console.warn(
+        "[linkedin-import] title classification failed, continuing without it",
+        err,
+      );
+    }
   }
 
   return summary;
