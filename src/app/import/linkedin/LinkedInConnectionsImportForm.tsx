@@ -14,8 +14,16 @@ type State =
       totalRows: number;
       created: number;
       classified: number;
+      industriesInferred: number;
     }
-  | { phase: "done"; totalRows: number; rowsSkippedNoUrl: number; created: number; classified: number }
+  | {
+      phase: "done";
+      totalRows: number;
+      rowsSkippedNoUrl: number;
+      created: number;
+      classified: number;
+      industriesInferred: number;
+    }
   | { phase: "error"; message: string; batchesDone: number; rowsDone: number };
 
 // This app's third client component (after CopyButton.tsx and
@@ -47,11 +55,13 @@ export function LinkedInConnectionsImportForm() {
       totalRows: 0,
       created: 0,
       classified: 0,
+      industriesInferred: 0,
     });
 
     let rowsDone = 0;
     let created = 0;
     let classified = 0;
+    let industriesInferred = 0;
 
     for (let batchIndex = 0; ; batchIndex += 1) {
       const result = await processLinkedInConnectionsBatchAction(csvText, batchIndex);
@@ -69,6 +79,7 @@ export function LinkedInConnectionsImportForm() {
       rowsDone += result.summary.rowsProcessed;
       created += result.summary.contactsCreated;
       classified += result.summary.titlesClassified;
+      industriesInferred += result.summary.industriesInferred;
 
       const isLastBatch = batchIndex + 1 === result.totalBatches;
 
@@ -79,6 +90,7 @@ export function LinkedInConnectionsImportForm() {
           rowsSkippedNoUrl: result.rowsSkippedNoUrl,
           created,
           classified,
+          industriesInferred,
         });
         return;
       }
@@ -91,6 +103,7 @@ export function LinkedInConnectionsImportForm() {
         totalRows: result.totalRows,
         created,
         classified,
+        industriesInferred,
       });
     }
   }
@@ -140,6 +153,7 @@ export function LinkedInConnectionsImportForm() {
           <li>Rows skipped (no profile URL): {state.rowsSkippedNoUrl}</li>
           <li>New contacts created: {state.created}</li>
           <li>Titles classified: {state.classified}</li>
+          <li>Industries inferred: {state.industriesInferred}</li>
         </ul>
       )}
 

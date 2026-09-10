@@ -1,9 +1,12 @@
 import type Anthropic from "@anthropic-ai/sdk";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { person } from "@/db/schema";
+import { createTestDb } from "@/db/test-utils";
 import {
   buildTitleExtractionPrompt,
   parseTitleExtractionResponse,
+  persistTitleClassifications,
   runWithConcurrency,
 } from "@/lib/title-extraction";
 
@@ -84,6 +87,46 @@ describe("parseTitleExtractionResponse", () => {
   it("throws when the response has no classify_titles tool call", () => {
     const response = { content: [{ type: "text", text: "sorry, I can't" }] } as Anthropic.Message;
     expect(() => parseTitleExtractionResponse(response)).toThrow();
+  });
+});
+
+describe("persistTitleClassifications", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+  });
+
+  it("writes standardizedTitle/seniority/function for multiple people in one call", async () => {
+    const [alice, bob] = await testDb.db
+      .insert(person)
+      .values([{ name: "Alice" }, { name: "Bob" }])
+      .returning();
+
+    await persistTitleClassifications(testDb.db, [
+      { personId: alice.id, standardizedTitle: "CEO", seniority: "c_level", function: "executive_general" },
+      { personId: bob.id, standardizedTitle: "Engineer", seniority: "ic", function: "engineering" },
+    ]);
+
+    const rows = await testDb.db.query.person.findMany({ orderBy: (p, { asc }) => asc(p.id) });
+    expect(rows.find((p) => p.id === alice.id)).toMatchObject({
+      standardizedTitle: "CEO",
+      seniority: "c_level",
+      function: "executive_general",
+    });
+    expect(rows.find((p) => p.id === bob.id)).toMatchObject({
+      standardizedTitle: "Engineer",
+      seniority: "ic",
+      function: "engineering",
+    });
+  });
+
+  it("is a no-op on an empty results array", async () => {
+    await expect(persistTitleClassifications(testDb.db, [])).resolves.toBeUndefined();
   });
 });
 

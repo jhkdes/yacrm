@@ -106,7 +106,6 @@ export default async function CampaignDetailPage({
       <p>
         <a
           href={`/campaigns?${new URLSearchParams({
-            goal: campaign.goal,
             campaignId: String(campaign.id),
           }).toString()}`}
         >

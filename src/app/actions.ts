@@ -43,6 +43,7 @@ import {
   dismissMergeSuggestion,
   undismissMergeSuggestion,
 } from "@/lib/merge-dismissals";
+import { draftFilterFromGoal } from "@/lib/filter-drafting";
 import { mergePersons, unmergePerson } from "@/lib/person-merge";
 import { listPersonIdsByTag, toggleTag } from "@/lib/person-tags";
 
@@ -563,6 +564,44 @@ export async function createCampaignAction(formData: FormData) {
     }).toString()}`;
   } catch (err) {
     console.error("Campaign creation failed", err);
+    redirectTarget = `/campaigns?${new URLSearchParams({
+      goal: goal as string,
+      error: err instanceof Error ? err.message : "unknown_error",
+    }).toString()}`;
+  }
+
+  redirect(redirectTarget);
+}
+
+// M33: drafts a structured filter from a free-text goal and redirects back
+// to /campaigns with it pre-filled as the same query params the manual
+// filter form (M32) already produces — "review and edit" is just those
+// checkboxes arriving pre-checked, not a new UI surface. campaignId (the
+// "add more people to an existing campaign" flow) passes through
+// unchanged if present.
+export async function draftFilterAction(formData: FormData) {
+  const goal = formData.get("goal");
+  const campaignId = formData.get("campaignId");
+
+  if (typeof goal !== "string" || !goal.trim()) {
+    redirect(`/campaigns?${new URLSearchParams({ error: "missing_goal" }).toString()}`);
+  }
+
+  let redirectTarget: string;
+  try {
+    const filter = await draftFilterFromGoal(goal as string);
+    const params = new URLSearchParams();
+    params.set("goal", goal as string);
+    params.set("title", filter.titleQuery ?? "");
+    for (const v of filter.seniority ?? []) params.append("seniority", v);
+    for (const v of filter.function ?? []) params.append("function", v);
+    for (const v of filter.industry ?? []) params.append("industry", v);
+    if (typeof campaignId === "string" && campaignId.trim()) {
+      params.set("campaignId", campaignId);
+    }
+    redirectTarget = `/campaigns?${params.toString()}`;
+  } catch (err) {
+    console.error("Filter drafting failed", err);
     redirectTarget = `/campaigns?${new URLSearchParams({
       goal: goal as string,
       error: err instanceof Error ? err.message : "unknown_error",

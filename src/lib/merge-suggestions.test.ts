@@ -317,6 +317,47 @@ describe("generateMergeSuggestions", () => {
     expect(generateMergeSuggestions(contacts)).toHaveLength(0);
   });
 
+  it("suggests a merge when the first name is a known nickname of the other", () => {
+    const contacts = [
+      contact({ contactId: 1, personId: 1, displayName: "Rob Smith" }),
+      contact({
+        contactId: 2,
+        personId: 2,
+        sourceIdentifier: "robert.smith@other.com",
+        displayName: "Robert Smith",
+      }),
+    ];
+
+    const suggestions = generateMergeSuggestions(contacts);
+
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]).toMatchObject({ personAId: 1, personBId: 2 });
+    expect(suggestions[0].reasons).toContain("name_nickname_match");
+  });
+
+  it("does not treat an unrelated first name sharing a last name as a nickname match", () => {
+    // "Rob"/"Kim" aren't a known nickname pair, and they're different
+    // enough that plain edit-distance similarity doesn't fire either
+    // (unlike "Rob"/"Ron", which are close enough to match via the
+    // separate similar_name/typo-tolerance path — not what's under test
+    // here).
+    const contacts = [
+      contact({ contactId: 1, personId: 1, displayName: "Rob Smith" }),
+      contact({ contactId: 2, personId: 2, displayName: "Kim Smith" }),
+    ];
+
+    expect(generateMergeSuggestions(contacts)).toHaveLength(0);
+  });
+
+  it("does not fire a nickname match on a different last name", () => {
+    const contacts = [
+      contact({ contactId: 1, personId: 1, displayName: "Rob Smith" }),
+      contact({ contactId: 2, personId: 2, displayName: "Robert Jones" }),
+    ];
+
+    expect(generateMergeSuggestions(contacts)).toHaveLength(0);
+  });
+
   it("finds a real match embedded in a large batch of otherwise-unrelated Contacts, without an O(n²) blowup", () => {
     // Every generated Contact gets a unique alphabetic name/local-part, so
     // it shares no index bucket with any other generated Contact — only the

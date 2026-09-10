@@ -89,6 +89,55 @@ export async function findOrCreateContact(
   };
 }
 
+// M31: looks up an existing Contact by (source, identifier) — no
+// creation, unlike findOrCreateContact. Exposes the "does this Contact
+// already exist" check findOrCreateContact does internally, so a caller
+// (linkedin-import.ts) can branch on it before deciding whether to try
+// M31's email-match attach path or fall through to findOrCreateContact's
+// create-a-new-Person default.
+export async function findContactBySourceIdentifier(
+  db: DrizzleDb,
+  source: "gmail" | "hotmail" | "linkedin" | "sms" | "google_calendar",
+  identifier: string,
+): Promise<{ contactId: number; personId: number } | undefined> {
+  const existing = await db.query.contact.findFirst({
+    where: and(eq(contact.source, source), eq(contact.sourceIdentifier, identifier)),
+  });
+  if (!existing) return undefined;
+  return { contactId: existing.id, personId: existing.personId };
+}
+
+// M31: inserts a new Contact under a *given* Person — the counterpart to
+// findOrCreateContact's "no match found" branch, for when the caller
+// already knows (via findContactByEmail) which existing Person this new
+// Contact belongs to, rather than letting a brand-new solo Person spawn
+// for a human who's already in the CRM under a different Contact.
+export async function attachContactToExistingPerson(
+  db: DrizzleDb,
+  source: "gmail" | "hotmail" | "linkedin" | "sms" | "google_calendar",
+  identity: ContactIdentity,
+  personId: number,
+  status: ContactStatus = "active",
+): Promise<ContactResolutionResult> {
+  const [newContact] = await db
+    .insert(contact)
+    .values({
+      personId,
+      source,
+      sourceIdentifier: identity.identifier,
+      displayName: identity.name,
+      status,
+    })
+    .returning();
+
+  return {
+    contactId: newContact.id,
+    personId,
+    wasCreated: true,
+    wasPromoted: false,
+  };
+}
+
 // M24: looks up an existing Contact by email only — no creation, unlike
 // findOrCreateContact. Restricted to the two email-shaped sources (gmail,
 // hotmail); sms's identifier is a phone number and linkedin's is a profile

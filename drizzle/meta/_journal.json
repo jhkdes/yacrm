@@ -99,6 +99,13 @@
       "when": 1788987283309,
       "tag": "0013_zippy_centennial",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1789016374734,
+      "tag": "0014_exotic_caretaker",
+      "breakpoints": true
     }
   ]
 }

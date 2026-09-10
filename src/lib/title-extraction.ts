@@ -1,8 +1,9 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { eq } from "drizzle-orm";
 
-import { person, personFunctionEnum, personSeniorityEnum } from "@/db/schema";
+import { personFunctionEnum, personSeniorityEnum } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
+import { bulkUpdateByKey } from "@/lib/db-bulk-update";
+import { SENIORITY_FUNCTION_GUIDANCE } from "@/lib/taxonomy-prompts";
 
 // Classification, not creative writing — a smaller/cheaper model is the
 // right call here, unlike draft-generation.ts's DRAFT_MODEL.
@@ -43,8 +44,10 @@ const FUNCTION_VALUES = new Set<string>(personFunctionEnum.enumValues);
 const CLASSIFY_TOOL_NAME = "classify_titles";
 
 // This guidance must stay in sync with docs/title-taxonomy.md, the
-// canonical source — that doc's tables are quoted verbatim below rather
-// than paraphrased, so a doc update should be copied here too.
+// canonical source. The value tables themselves live in
+// taxonomy-prompts.ts (shared with filter-drafting.ts) — this composes
+// them with title-extraction-specific framing, examples, and the
+// ambiguity rule.
 const SYSTEM_PROMPT = `You classify LinkedIn job titles into a fixed taxonomy for a CRM's campaign-targeting feature. For each person given, produce a standardized title, a seniority value, and a function value.
 
 Three fields come out of one raw title string:
@@ -52,31 +55,7 @@ Three fields come out of one raw title string:
 - Seniority: one fixed value from the table below.
 - Function: one fixed value from the table below.
 
-## Seniority values
-- ic: Individual contributor — no reports. Includes "Senior," "Staff," "Principal," "Lead" when "Lead" doesn't denote people management (title-dependent, use judgment).
-- manager: First-line or mid-level people management: "Manager," "Team Lead" (people-management sense), "Head of" a small team.
-- director: "Director," "Senior Director," "Group Manager."
-- vp: "VP," "Vice President," "SVP," "EVP."
-- c_level: "Chief *Officer" (CEO, CTO, CPO, CMO, etc.), "President."
-- founder: "Founder," "Co-Founder," "Owner" — takes priority over any other seniority signal in the same title.
-- unknown: Title present but seniority can't be confidently determined (e.g. just "Consultant," "Advisor," or too vague).
-
-## Function values
-- product_management: Product Manager, Product Owner, Head of Product.
-- product_marketing: Product Marketing Manager, PMM.
-- engineering: Software/Platform/Infrastructure/QA Engineering, Engineering Management.
-- design: Product Design, UX/UI, Design Research.
-- data_analytics: Data Science, Data Engineering, Analytics, BI.
-- sales: Sales, Account Executive, Business Development (revenue-generating, external-facing).
-- marketing: Marketing (brand, demand gen, content) — everything marketing except product marketing.
-- customer_success: Customer Success, Support, Implementation, Solutions Engineering (post-sale, customer-facing).
-- operations: Business Ops, Revenue Ops, Strategy & Ops, general "Operations."
-- finance: Finance, Accounting, FP&A.
-- people_hr: HR, People, Talent, Recruiting.
-- legal: Legal, Compliance.
-- it: Internal IT, Security (corporate, not product security).
-- executive_general: General management not captured above: CEO acting as generalist, General Manager, Managing Director.
-- other: Doesn't fit cleanly, or title is too vague to classify.
+${SENIORITY_FUNCTION_GUIDANCE}
 
 ## Examples
 - "Director of Product Management - Cloud Platform, Integration, Embedded and API Strategy" -> standardizedTitle "Director of Product Management", seniority director, function product_management.
@@ -222,11 +201,42 @@ export async function runWithConcurrency<T, R>(
   return results;
 }
 
+// DB-only (no network) — split out from classifyTitles so it's directly
+// pglite-testable. Previously this write only existed inline inside the
+// untested full-pipeline function, so it had zero direct test coverage.
+// Uses one bulk UPDATE...FROM VALUES statement (bulkUpdateByKey) instead
+// of a per-result sequential loop — at real-world import volume (a
+// 120-row batch can mean up to 120 sequential writes) that loop was the
+// dominant cost of a large import, not LLM latency (see M29 in
+// docs/technical-design-and-milestones.md).
+export async function persistTitleClassifications(
+  db: DrizzleDb,
+  results: TitleClassificationResult[],
+): Promise<void> {
+  await bulkUpdateByKey(db, {
+    table: "person",
+    keyColumn: "id",
+    keyType: "integer",
+    setColumns: [
+      { column: "standardized_title", sqlType: "text" },
+      { column: "seniority", sqlType: "person_seniority" },
+      { column: "function", sqlType: "person_function" },
+    ],
+    rows: results.map((r) => ({
+      id: r.personId,
+      standardized_title: r.standardizedTitle,
+      seniority: r.seniority,
+      function: r.function,
+    })),
+  });
+}
+
 // Full pipeline: classifies every given row (batched, with up to
 // CLASSIFY_CONCURRENCY batches in flight at once) and writes the result
 // onto `person`. Not unit tested directly (real network call) — see
-// buildTitleExtractionPrompt/parseTitleExtractionResponse for the tested
-// pieces, and scripts/classify-titles.ts for real-data verification.
+// buildTitleExtractionPrompt/parseTitleExtractionResponse and
+// persistTitleClassifications for the tested pieces, and
+// scripts/classify-titles.ts for real-data verification.
 export async function classifyTitles(
   db: DrizzleDb,
   rows: TitleClassificationInput[],
@@ -238,17 +248,7 @@ export async function classifyTitles(
   );
   const results = batchResults.flat();
 
-  for (const r of results) {
-    await db
-      .update(person)
-      .set({
-        standardizedTitle: r.standardizedTitle,
-        seniority: r.seniority,
-        function: r.function,
-        updatedAt: new Date(),
-      })
-      .where(eq(person.id, r.personId));
-  }
+  await persistTitleClassifications(db, results);
 
   return results;
 }
