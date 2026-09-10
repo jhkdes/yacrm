@@ -14,7 +14,7 @@ interface CandidateDrawerTriggerProps {
 }
 
 // This app's 4th client component (after CopyButton.tsx,
-// ImportSubmitButton.tsx, LinkedInConnectionsImportForm.tsx), same
+// SubmitButton.tsx, LinkedInConnectionsImportForm.tsx), same
 // narrow-leaf pattern — one instance per table row, each owning its own
 // open/closed state, rather than one client component wrapping the whole
 // table. The table's checkboxes stay part of the server-rendered POST

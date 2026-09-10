@@ -1,16 +1,14 @@
 import {
-  addRecipientsToCampaignAction,
-  createCampaignAction,
   createIntroCampaignAction,
   deleteCampaignAction,
   draftFilterAction,
   restoreCampaignAction,
 } from "@/app/actions";
+import { SubmitButton } from "@/app/_components/SubmitButton";
 import { db } from "@/db/client";
 import { companyIndustryEnum, personFunctionEnum, personSeniorityEnum } from "@/db/schema";
 import {
   BROAD_RESULT_THRESHOLD,
-  buildCandidateSortUrl,
   filterCandidates,
   sortFilterResults,
   type FilterResult,
@@ -18,7 +16,7 @@ import {
 } from "@/lib/candidate-filter";
 import { listDistinctTags, listPersonIdsByTag } from "@/lib/person-tags";
 
-import { CandidateDrawerTrigger } from "./CandidateDrawerTrigger";
+import { CampaignRecipientsForm } from "./CampaignRecipientsForm";
 
 function toArray(value: string | string[] | undefined): string[] {
   if (value === undefined) return [];
@@ -105,31 +103,6 @@ export default async function CampaignsPage({
     }
   }
 
-  // Preserves every current filter/goal/campaignId param, only changing
-  // sort/dir — same link-driven pattern as M26's /people sort links. A
-  // second click on the already-active column flips direction instead of
-  // resetting to ascending.
-  function buildSortUrl(field: SortField): string {
-    return buildCandidateSortUrl(
-      {
-        title: params.title,
-        seniority: seniorityValues,
-        function: functionValues,
-        industry: industryValues,
-        goal: params.goal,
-        campaignId: targetCampaignId,
-        currentSort: params.sort,
-        currentDir: params.dir,
-      },
-      field,
-    );
-  }
-
-  function sortIndicator(field: SortField): string {
-    if (params.sort !== field) return "";
-    return params.dir === "desc" ? " ▼" : " ▲";
-  }
-
   const existingCampaigns = await db.query.campaign.findMany({
     where: (c, { isNull }) => isNull(c.deletedAt),
     orderBy: (c, { desc }) => desc(c.createdAt),
@@ -210,7 +183,7 @@ export default async function CampaignsPage({
             required
           />
         </label>{" "}
-        <button type="submit">Draft filter</button>
+        <SubmitButton idleLabel="Draft filter" pendingLabel="Drafting…" />
         <p style={{ color: "#555", margin: "0.25rem 0 0" }}>
           Drafts the checkboxes below from your goal — review and edit them
           before creating the campaign. This doesn&apos;t target people
@@ -286,7 +259,7 @@ export default async function CampaignsPage({
             ))}
           </div>
         </fieldset>
-        <button type="submit">Filter people</button>
+        <SubmitButton idleLabel="Filter people" pendingLabel="Filtering…" />
       </form>
 
       <h2>New campaign — target a tag</h2>
@@ -413,144 +386,22 @@ export default async function CampaignsPage({
                   consider narrowing the filter above.
                 </p>
               )}
-            <form
-              action={
-                targetCampaign
-                  ? addRecipientsToCampaignAction
-                  : createCampaignAction
-              }
-            >
-              {targetCampaign && (
-                <input
-                  type="hidden"
-                  name="campaignId"
-                  value={targetCampaign.id}
-                />
-              )}
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ borderCollapse: "collapse", width: "100%" }}>
-                  <thead>
-                    <tr>
-                      <th></th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("name")}>Name{sortIndicator("name")}</a>
-                      </th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("title")}>Title{sortIndicator("title")}</a>
-                      </th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("company")}>Company{sortIndicator("company")}</a>
-                      </th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("seniority")}>Seniority{sortIndicator("seniority")}</a>
-                      </th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("function")}>Function{sortIndicator("function")}</a>
-                      </th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("industry")}>Industry{sortIndicator("industry")}</a>
-                      </th>
-                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
-                        <a href={buildSortUrl("lastInteraction")}>
-                          Last interaction{sortIndicator("lastInteraction")}
-                        </a>
-                      </th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {results.map((r) => (
-                      <tr key={r.personId} style={{ borderTop: "1px solid #eee" }}>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>
-                          <input type="checkbox" name="personIds" value={r.personId} />
-                        </td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>
-                          <a href={`/people/${r.personId}`}>{r.name}</a>
-                        </td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.standardizedTitle ?? "—"}</td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.company ?? "—"}</td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.seniority ?? "—"}</td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.function ?? "—"}</td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.industry ?? "—"}</td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>
-                          {r.lastInteractionAt ? r.lastInteractionAt.toISOString().slice(0, 10) : "—"}
-                        </td>
-                        <td style={{ padding: "0.25rem 0.5rem" }}>
-                          <CandidateDrawerTrigger
-                            name={r.name}
-                            standardizedTitle={r.standardizedTitle}
-                            company={r.company}
-                            seniority={r.seniority}
-                            function={r.function}
-                            industry={r.industry}
-                            lastInteractionAt={r.lastInteractionAt}
-                            linkedinProfileUrl={r.linkedinProfileUrl}
-                          />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              {!targetCampaign && (
-                <>
-                  <p>
-                    <label>
-                      Campaign name:{" "}
-                      <input
-                        type="text"
-                        name="name"
-                        placeholder="e.g. AI interview outreach — Sept"
-                        style={{ width: "24rem" }}
-                        required
-                      />
-                    </label>
-                  </p>
-                  <p>
-                    <label>
-                      Campaign goal (used to draft each message, not for
-                      targeting):{" "}
-                      <input
-                        type="text"
-                        name="goal"
-                        defaultValue={params.goal ?? ""}
-                        placeholder="e.g. inviting them to try our AI interview study"
-                        style={{ width: "28rem" }}
-                        required
-                      />
-                    </label>
-                  </p>
-                  <p>
-                    <label>
-                      Destination link (where a recipient&apos;s tracked link
-                      sends them, e.g. the AI interview study URL):{" "}
-                      <input
-                        type="url"
-                        name="destinationUrl"
-                        placeholder="https://..."
-                        style={{ width: "24rem" }}
-                        required
-                      />
-                    </label>
-                  </p>
-                </>
-              )}
-              <p>
-                <label>
-                  Send via:{" "}
-                  <select name="channel" defaultValue="email">
-                    <option value="email">Email</option>
-                    <option value="linkedin">LinkedIn (copy-assist queue)</option>
-                  </select>
-                </label>
-              </p>
-              <button type="submit">
-                {targetCampaign
-                  ? `Add checked people to ${targetCampaign.name}`
-                  : "Create campaign from checked people"}
-              </button>
-            </form>
+              <CampaignRecipientsForm
+                results={results}
+                targetCampaign={
+                  targetCampaign ? { id: targetCampaign.id, name: targetCampaign.name } : null
+                }
+                sortUrlParams={{
+                  title: params.title,
+                  seniority: seniorityValues,
+                  function: functionValues,
+                  industry: industryValues,
+                  goal: params.goal,
+                  campaignId: targetCampaignId,
+                  currentSort: params.sort,
+                  currentDir: params.dir,
+                }}
+              />
             </>
           )}
         </>

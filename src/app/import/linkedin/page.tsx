@@ -1,6 +1,6 @@
 import { importLinkedInMessagesAction } from "@/app/actions";
+import { SubmitButton } from "@/app/_components/SubmitButton";
 
-import { ImportSubmitButton } from "./ImportSubmitButton";
 import { LinkedInConnectionsImportForm } from "./LinkedInConnectionsImportForm";
 
 export default async function ImportLinkedIn({
@@ -56,7 +56,11 @@ export default async function ImportLinkedIn({
           </label>
         </p>
         <input type="file" name="file" accept=".csv" required />
-        <ImportSubmitButton />
+        <SubmitButton
+          idleLabel="Import"
+          pendingLabel="Importing…"
+          pendingMessage="Processing — large exports can take a few minutes, please don't close this tab."
+        />
       </form>
 
       {params.messages_import_error && (

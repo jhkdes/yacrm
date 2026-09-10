@@ -515,62 +515,88 @@ function isValidHttpUrl(value: string): boolean {
   }
 }
 
-export async function createCampaignAction(formData: FormData) {
-  const name = formData.get("name");
-  const goal = formData.get("goal");
-  const channel = formData.get("channel");
-  const destinationUrl = formData.get("destinationUrl");
-  const personIds = formData
-    .getAll("personIds")
-    .map((v) => Number(v))
-    .filter((n) => Number.isInteger(n));
+export type CampaignRecipientsBatchResult =
+  | { ok: false; error: "invalid_request"; message: string }
+  | { ok: false; error: "unknown"; message: string; campaignId: number | null }
+  | {
+      ok: true;
+      campaignId: number;
+      added: number;
+      skippedNoContactForChannel: number;
+      skippedDraftFailed: number;
+      skippedAlreadyRecipient: number;
+    };
 
-  if (
-    typeof name !== "string" ||
-    !name.trim() ||
-    typeof goal !== "string" ||
-    !goal.trim() ||
-    !isCampaignChannel(channel) ||
-    typeof destinationUrl !== "string" ||
-    !isValidHttpUrl(destinationUrl) ||
-    personIds.length === 0
-  ) {
-    redirect(
-      `/campaigns?${new URLSearchParams({
-        goal: typeof goal === "string" ? goal : "",
-        error: "invalid_campaign_request",
-      }).toString()}`,
-    );
+// Called directly by CampaignRecipientsForm.tsx as a plain async function
+// (not via <form action>), once per small batch of personIds — same
+// reasoning as M32's processLinkedInConnectionsBatchAction: drafting a
+// message per person is a real Anthropic call each, so a single
+// all-at-once request gives no progress feedback for anything but a tiny
+// list. The campaign is created on the very first call (when campaignId
+// isn't known yet); every later call — and every call at all when adding
+// to an existing campaign, which already has a campaignId before the
+// first batch — just adds this batch's people to it. Replaces
+// createCampaignAction and addRecipientsToCampaignAction, both deleted.
+export async function processCampaignRecipientsBatchAction(input: {
+  name?: string;
+  goal?: string;
+  destinationUrl?: string;
+  campaignId?: number;
+  channel: CampaignChannel;
+  personIds: number[];
+}): Promise<CampaignRecipientsBatchResult> {
+  if (!isCampaignChannel(input.channel) || input.personIds.length === 0) {
+    return {
+      ok: false,
+      error: "invalid_request",
+      message: "Missing or invalid channel/personIds.",
+    };
   }
 
-  let redirectTarget: string;
+  let campaignId = input.campaignId;
+
   try {
-    const { campaignId } = await createCampaign(
-      db,
-      name as string,
-      goal as string,
-      destinationUrl as string,
-    );
+    if (campaignId === undefined) {
+      if (
+        !input.name?.trim() ||
+        !input.goal?.trim() ||
+        !input.destinationUrl ||
+        !isValidHttpUrl(input.destinationUrl)
+      ) {
+        return {
+          ok: false,
+          error: "invalid_request",
+          message: "Missing or invalid campaign name/goal/destination link.",
+        };
+      }
+      const created = await createCampaign(db, input.name, input.goal, input.destinationUrl);
+      campaignId = created.campaignId;
+    }
+
     const result = await addRecipients(
       db,
       campaignId,
-      personIds.map((personId) => ({ personId })),
-      channel as CampaignChannel,
+      input.personIds.map((personId) => ({ personId })),
+      input.channel,
     );
-    redirectTarget = `/campaigns/${campaignId}?${new URLSearchParams({
-      added: String(result.added),
-      skipped_no_contact: String(result.skippedNoContactForChannel),
-      skipped_draft_failed: String(result.skippedDraftFailed),
-    }).toString()}`;
-  } catch (err) {
-    console.error("Campaign creation failed", err);
-    redirectTarget = `/campaigns?${new URLSearchParams({
-      goal: goal as string,
-      error: err instanceof Error ? err.message : "unknown_error",
-    }).toString()}`;
-  }
 
-  redirect(redirectTarget);
+    return {
+      ok: true,
+      campaignId,
+      added: result.added,
+      skippedNoContactForChannel: result.skippedNoContactForChannel,
+      skippedDraftFailed: result.skippedDraftFailed,
+      skippedAlreadyRecipient: result.skippedAlreadyRecipient,
+    };
+  } catch (err) {
+    console.error("Campaign recipients batch failed", err);
+    return {
+      ok: false,
+      error: "unknown",
+      message: err instanceof Error ? err.message : "unknown_error",
+      campaignId: campaignId ?? null,
+    };
+  }
 }
 
 // M33: drafts a structured filter from a free-text goal and redirects back
@@ -666,46 +692,6 @@ export async function createIntroCampaignAction(formData: FormData) {
       tag: tag as string,
       error: err instanceof Error ? err.message : "unknown_error",
     }).toString()}`;
-  }
-
-  redirect(redirectTarget);
-}
-
-export async function addRecipientsToCampaignAction(formData: FormData) {
-  const campaignId = Number(formData.get("campaignId"));
-  const channel = formData.get("channel");
-  const personIds = formData
-    .getAll("personIds")
-    .map((v) => Number(v))
-    .filter((n) => Number.isInteger(n));
-
-  if (
-    !Number.isInteger(campaignId) ||
-    !isCampaignChannel(channel) ||
-    personIds.length === 0
-  ) {
-    redirect(`/campaigns/${campaignId}?error=invalid_add_request`);
-  }
-
-  let redirectTarget: string;
-  try {
-    const result = await addRecipients(
-      db,
-      campaignId,
-      personIds.map((personId) => ({ personId })),
-      channel as CampaignChannel,
-    );
-    redirectTarget = `/campaigns/${campaignId}?${new URLSearchParams({
-      added: String(result.added),
-      skipped_no_contact: String(result.skippedNoContactForChannel),
-      skipped_draft_failed: String(result.skippedDraftFailed),
-      skipped_already: String(result.skippedAlreadyRecipient),
-    }).toString()}`;
-  } catch (err) {
-    console.error("Adding recipients to campaign failed", err);
-    redirectTarget = `/campaigns/${campaignId}?error=${encodeURIComponent(
-      err instanceof Error ? err.message : "unknown_error",
-    )}`;
   }
 
   redirect(redirectTarget);

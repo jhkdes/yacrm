@@ -27,7 +27,7 @@ type State =
   | { phase: "error"; message: string; batchesDone: number; rowsDone: number };
 
 // This app's third client component (after CopyButton.tsx and
-// ImportSubmitButton.tsx), and its first with real state/a loop — the
+// SubmitButton.tsx), and its first with real state/a loop — the
 // requirement (a live completion %) can't be shown by a redirect-based
 // Server Action, which only resolves once, at the very end. This
 // component reads the uploaded file to text once, then calls
