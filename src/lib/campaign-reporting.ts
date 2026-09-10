@@ -10,9 +10,7 @@ export type CampaignRecipientStatus =
 // Everything summarizeCampaign/recipientsToCsv need about one recipient —
 // callers (the campaign detail page, the CSV export route) build this from
 // their own db.query.campaign.findFirst({ with: { recipients: ... } })
-// result rather than this module reaching into the DB itself, the same way
-// campaign-ranking.ts's pure rankPeopleByEmbedding takes plain data instead
-// of a db handle.
+// result rather than this module reaching into the DB itself.
 export interface CampaignRecipientRow {
   personName: string;
   contactIdentifier: string;

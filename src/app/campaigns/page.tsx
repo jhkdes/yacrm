@@ -3,33 +3,66 @@ import {
   createCampaignAction,
   createIntroCampaignAction,
   deleteCampaignAction,
+  draftFilterAction,
   restoreCampaignAction,
 } from "@/app/actions";
 import { db } from "@/db/client";
-import { rankPeopleForCampaign } from "@/lib/campaign-ranking";
+import { companyIndustryEnum, personFunctionEnum, personSeniorityEnum } from "@/db/schema";
+import {
+  BROAD_RESULT_THRESHOLD,
+  buildCandidateSortUrl,
+  filterCandidates,
+  sortFilterResults,
+  type FilterResult,
+  type SortField,
+} from "@/lib/candidate-filter";
 import { listDistinctTags, listPersonIdsByTag } from "@/lib/person-tags";
+
+import { CandidateDrawerTrigger } from "./CandidateDrawerTrigger";
+
+function toArray(value: string | string[] | undefined): string[] {
+  if (value === undefined) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+const SORT_FIELDS: SortField[] = [
+  "name",
+  "title",
+  "company",
+  "seniority",
+  "function",
+  "industry",
+  "lastInteraction",
+];
+
+function isSortField(value: string | undefined): value is SortField {
+  return value !== undefined && (SORT_FIELDS as string[]).includes(value);
+}
 
 export default async function CampaignsPage({
   searchParams,
 }: {
   searchParams: Promise<{
+    title?: string;
+    seniority?: string | string[];
+    function?: string | string[];
+    industry?: string | string[];
     goal?: string;
+    sort?: string;
+    dir?: string;
     error?: string;
     sent?: string;
     campaignId?: string;
     campaign_deleted?: string;
-    // Present only on the redirect immediately after a delete — drives a
-    // one-shot "Undo" link that's gone the moment you navigate elsewhere.
     undo_campaign_id?: string;
     tag?: string;
   }>;
 }) {
   const params = await searchParams;
-  const goal = params.goal?.trim();
   const tag = params.tag?.trim();
 
   // Present when arriving via a campaign's "Add more people" link — targets
-  // this ranking pass at an existing Campaign instead of creating a new one.
+  // this filter pass at an existing Campaign instead of creating a new one.
   const targetCampaignId = params.campaignId
     ? Number(params.campaignId)
     : null;
@@ -41,14 +74,60 @@ export default async function CampaignsPage({
         })
       : null;
 
-  let results: Awaited<ReturnType<typeof rankPeopleForCampaign>> = [];
+  const seniorityValues = toArray(params.seniority) as (typeof personSeniorityEnum.enumValues)[number][];
+  const functionValues = toArray(params.function) as (typeof personFunctionEnum.enumValues)[number][];
+  const industryValues = toArray(params.industry) as (typeof companyIndustryEnum.enumValues)[number][];
+  const titleQuery = params.title?.trim();
+
+  // A submitted filter form always includes `title` (even empty — a plain
+  // text input serializes regardless of value), so its presence in the URL
+  // is a reliable "the form was submitted" signal distinct from "no
+  // criteria chosen" (an empty filter is valid — it just means everyone
+  // eligible). Arriving via "Add more people" runs the filter immediately
+  // too, matching the old goal-ranking page's arrive-and-see-results flow.
+  const shouldFilter = params.title !== undefined || Boolean(targetCampaign);
+
+  let results: FilterResult[] = [];
   let error: string | null = params.error ?? null;
-  if (goal && !error) {
+  if (shouldFilter && !error) {
     try {
-      results = await rankPeopleForCampaign(db, goal);
+      results = await filterCandidates(db, {
+        titleQuery,
+        seniority: seniorityValues.length ? seniorityValues : undefined,
+        function: functionValues.length ? functionValues : undefined,
+        industry: industryValues.length ? industryValues : undefined,
+      });
+      if (isSortField(params.sort)) {
+        results = sortFilterResults(results, params.sort, params.dir === "desc" ? "desc" : "asc");
+      }
     } catch (err) {
       error = err instanceof Error ? err.message : "unknown_error";
     }
+  }
+
+  // Preserves every current filter/goal/campaignId param, only changing
+  // sort/dir — same link-driven pattern as M26's /people sort links. A
+  // second click on the already-active column flips direction instead of
+  // resetting to ascending.
+  function buildSortUrl(field: SortField): string {
+    return buildCandidateSortUrl(
+      {
+        title: params.title,
+        seniority: seniorityValues,
+        function: functionValues,
+        industry: industryValues,
+        goal: params.goal,
+        campaignId: targetCampaignId,
+        currentSort: params.sort,
+        currentDir: params.dir,
+      },
+      field,
+    );
+  }
+
+  function sortIndicator(field: SortField): string {
+    if (params.sort !== field) return "";
+    return params.dir === "desc" ? " ▼" : " ▲";
   }
 
   const existingCampaigns = await db.query.campaign.findMany({
@@ -114,19 +193,100 @@ export default async function CampaignsPage({
       )}
 
       <h2>New campaign — target people</h2>
-      <form action="/campaigns" method="GET">
+
+      <h3>Draft a filter from your goal (optional)</h3>
+      <form action={draftFilterAction} style={{ marginBottom: "1rem" }}>
+        {targetCampaignId && (
+          <input type="hidden" name="campaignId" value={targetCampaignId} />
+        )}
         <label>
           Campaign goal:{" "}
           <input
             type="text"
             name="goal"
-            defaultValue={goal}
-            placeholder="e.g. hiring a senior backend engineer"
+            defaultValue={params.goal ?? ""}
+            placeholder="e.g. hiring enterprise PMs at mid-size B2B software companies"
             style={{ width: "28rem" }}
             required
           />
-        </label>
-        <button type="submit">Rank people</button>
+        </label>{" "}
+        <button type="submit">Draft filter</button>
+        <p style={{ color: "#555", margin: "0.25rem 0 0" }}>
+          Drafts the checkboxes below from your goal — review and edit them
+          before creating the campaign. This doesn&apos;t target people
+          directly; it just pre-fills the filter.
+        </p>
+      </form>
+
+      <form action="/campaigns" method="GET">
+        {targetCampaignId && (
+          <input type="hidden" name="campaignId" value={targetCampaignId} />
+        )}
+        <p>
+          <label>
+            Title contains:{" "}
+            <input
+              type="text"
+              name="title"
+              defaultValue={params.title ?? ""}
+              placeholder="e.g. product manager"
+              style={{ width: "20rem" }}
+            />
+          </label>
+        </p>
+        <fieldset style={{ marginBottom: "0.75rem" }}>
+          <legend>Seniority</legend>
+          {personSeniorityEnum.enumValues.map((v) => (
+            <label key={v} style={{ marginRight: "1rem" }}>
+              <input
+                type="checkbox"
+                name="seniority"
+                value={v}
+                defaultChecked={seniorityValues.includes(v)}
+              />{" "}
+              {v}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset style={{ marginBottom: "0.75rem" }}>
+          <legend>Function</legend>
+          {personFunctionEnum.enumValues.map((v) => (
+            <label key={v} style={{ marginRight: "1rem" }}>
+              <input
+                type="checkbox"
+                name="function"
+                value={v}
+                defaultChecked={functionValues.includes(v)}
+              />{" "}
+              {v}
+            </label>
+          ))}
+        </fieldset>
+        <fieldset style={{ marginBottom: "0.75rem" }}>
+          <legend>Industry</legend>
+          <div
+            style={{
+              maxHeight: "10rem",
+              overflowY: "auto",
+              border: "1px solid #ccc",
+              padding: "0.5rem",
+              width: "24rem",
+            }}
+          >
+            {companyIndustryEnum.enumValues.map((v) => (
+              <label key={v} style={{ display: "block" }}>
+                <input
+                  type="checkbox"
+                  name="industry"
+                  value={v}
+                  defaultChecked={industryValues.includes(v)}
+                />{" "}
+                {v}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <button type="submit">Filter people</button>
       </form>
 
       <h2>New campaign — target a tag</h2>
@@ -220,13 +380,13 @@ export default async function CampaignsPage({
 
       {error && (
         <p style={{ color: "crimson" }}>
-          {tag ? "Campaign creation failed" : "Ranking failed"}: {error}
+          {tag ? "Campaign creation failed" : "Filtering failed"}: {error}
         </p>
       )}
 
-      {goal && !error && (
+      {shouldFilter && !error && (
         <>
-          <h2>Top {results.length} for &quot;{goal}&quot;</h2>
+          <h2>{results.length} matching people</h2>
           {targetCampaignId && !targetCampaign && (
             <p style={{ color: "crimson" }}>
               Campaign {targetCampaignId} not found — targeting will create a
@@ -241,11 +401,18 @@ export default async function CampaignsPage({
           )}
           {results.length === 0 ? (
             <p>
-              No eligible People yet — this needs Contacts with an active
-              status and an Event embedding (see M11). Run an import and make
-              sure VOYAGE_API_KEY is set.
+              No eligible people match this filter. Eligibility requires an
+              active LinkedIn contact — try loosening the filter, or import
+              more connections first.
             </p>
           ) : (
+            <>
+              {results.length > BROAD_RESULT_THRESHOLD && (
+                <p style={{ color: "#a15c00" }}>
+                  {results.length} matches is a lot to review by hand —
+                  consider narrowing the filter above.
+                </p>
+              )}
             <form
               action={
                 targetCampaign
@@ -253,40 +420,78 @@ export default async function CampaignsPage({
                   : createCampaignAction
               }
             >
-              {targetCampaign ? (
+              {targetCampaign && (
                 <input
                   type="hidden"
                   name="campaignId"
                   value={targetCampaign.id}
                 />
-              ) : (
-                <input type="hidden" name="goal" value={goal} />
               )}
-              <ol>
-                {results.map((r) => (
-                  <li key={r.personId} style={{ margin: "0.5rem 0" }}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        name="personIds"
-                        value={r.personId}
-                      />{" "}
-                      <a href={`/people/${r.personId}`}>{r.name}</a>
-                    </label>{" "}
-                    — score {r.score.toFixed(3)} (similarity{" "}
-                    {r.similarity.toFixed(2)}, recency{" "}
-                    {r.recencyScore.toFixed(2)}, engagement{" "}
-                    {r.engagementScore.toFixed(2)}, {r.eventCount} event
-                    {r.eventCount === 1 ? "" : "s"}, last{" "}
-                    {r.lastEventAt.toISOString().slice(0, 10)}) —{" "}
-                    <a
-                      href={`/campaigns/draft?personId=${r.personId}&goal=${encodeURIComponent(goal)}`}
-                    >
-                      Draft one-off outreach
-                    </a>
-                  </li>
-                ))}
-              </ol>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                  <thead>
+                    <tr>
+                      <th></th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("name")}>Name{sortIndicator("name")}</a>
+                      </th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("title")}>Title{sortIndicator("title")}</a>
+                      </th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("company")}>Company{sortIndicator("company")}</a>
+                      </th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("seniority")}>Seniority{sortIndicator("seniority")}</a>
+                      </th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("function")}>Function{sortIndicator("function")}</a>
+                      </th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("industry")}>Industry{sortIndicator("industry")}</a>
+                      </th>
+                      <th style={{ textAlign: "left", padding: "0.25rem 0.5rem" }}>
+                        <a href={buildSortUrl("lastInteraction")}>
+                          Last interaction{sortIndicator("lastInteraction")}
+                        </a>
+                      </th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.map((r) => (
+                      <tr key={r.personId} style={{ borderTop: "1px solid #eee" }}>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>
+                          <input type="checkbox" name="personIds" value={r.personId} />
+                        </td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>
+                          <a href={`/people/${r.personId}`}>{r.name}</a>
+                        </td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.standardizedTitle ?? "—"}</td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.company ?? "—"}</td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.seniority ?? "—"}</td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.function ?? "—"}</td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>{r.industry ?? "—"}</td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>
+                          {r.lastInteractionAt ? r.lastInteractionAt.toISOString().slice(0, 10) : "—"}
+                        </td>
+                        <td style={{ padding: "0.25rem 0.5rem" }}>
+                          <CandidateDrawerTrigger
+                            name={r.name}
+                            standardizedTitle={r.standardizedTitle}
+                            company={r.company}
+                            seniority={r.seniority}
+                            function={r.function}
+                            industry={r.industry}
+                            lastInteractionAt={r.lastInteractionAt}
+                            linkedinProfileUrl={r.linkedinProfileUrl}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
               {!targetCampaign && (
                 <>
@@ -298,6 +503,20 @@ export default async function CampaignsPage({
                         name="name"
                         placeholder="e.g. AI interview outreach — Sept"
                         style={{ width: "24rem" }}
+                        required
+                      />
+                    </label>
+                  </p>
+                  <p>
+                    <label>
+                      Campaign goal (used to draft each message, not for
+                      targeting):{" "}
+                      <input
+                        type="text"
+                        name="goal"
+                        defaultValue={params.goal ?? ""}
+                        placeholder="e.g. inviting them to try our AI interview study"
+                        style={{ width: "28rem" }}
                         required
                       />
                     </label>
@@ -332,9 +551,14 @@ export default async function CampaignsPage({
                   : "Create campaign from checked people"}
               </button>
             </form>
+            </>
           )}
         </>
       )}
+
+      <p>
+        <a href="/contacts">View contacts</a>
+      </p>
     </main>
   );
 }

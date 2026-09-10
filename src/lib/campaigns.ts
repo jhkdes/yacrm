@@ -2,7 +2,6 @@ import { and, eq, isNotNull, isNull } from "drizzle-orm";
 
 import { campaign, campaignRecipient, contact } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
-import type { CampaignRankingEntry } from "@/lib/campaign-ranking";
 import { fillLinkPlaceholder, generateDraftForPerson } from "@/lib/draft-generation";
 import { buildTrackedLinkUrl, requireRedirectBaseUrl } from "@/lib/tracked-link";
 
@@ -54,7 +53,7 @@ export interface AddRecipientsResult {
   skippedAlreadyRecipient: number;
 }
 
-// Adds a batch of ranked People to a Campaign as recipients: for each one,
+// Adds a batch of People to a Campaign as recipients: for each one,
 // finds their Contact on the requested channel, generates a personalized
 // draft against the Campaign's own persisted goal (not a separately-passed
 // goal — keeps every recipient's draft grounded in the same goal the
@@ -77,7 +76,7 @@ export interface AddRecipientsResult {
 export async function addRecipients(
   db: DrizzleDb,
   campaignId: number,
-  people: Pick<CampaignRankingEntry, "personId">[],
+  people: { personId: number }[],
   channel: CampaignChannel,
 ): Promise<AddRecipientsResult> {
   const [campaignRow] = await db

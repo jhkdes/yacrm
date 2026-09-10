@@ -1,7 +1,7 @@
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { contact, person } from "@/db/schema";
+import { companyIndustryCache, contact, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
 import {
   assertRowCountAllowed,
@@ -44,6 +44,40 @@ vi.mock("@/lib/title-extraction", async (importOriginal) => {
           .where(eq(person.id, r.personId));
       }
       return results;
+    }),
+  };
+});
+
+// Same rationale as the title-extraction mock above, applied to industry
+// inference: writes real rows into companyIndustryCache (cache-hit-first,
+// like the real function) so downstream dedup/backfill behavior is
+// exercised for real, not just assumed.
+vi.mock("@/lib/industry-inference", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/industry-inference")>();
+  return {
+    ...actual,
+    inferIndustries: vi.fn(async (db, names: string[]) => {
+      const unique = [...new Set(names)];
+      const cachedRows = await db
+        .select()
+        .from(companyIndustryCache)
+        .where(inArray(companyIndustryCache.normalizedCompanyName, unique));
+      const result = new Map(
+        cachedRows.map((r: { normalizedCompanyName: string; industry: string }) => [
+          r.normalizedCompanyName,
+          r.industry,
+        ]),
+      );
+      const missing = unique.filter((n) => !result.has(n));
+      if (missing.length > 0) {
+        const newRows = missing.map((name) => ({
+          normalizedCompanyName: name,
+          industry: "tech_enterprise_software" as const,
+        }));
+        await db.insert(companyIndustryCache).values(newRows).onConflictDoNothing();
+        for (const r of newRows) result.set(r.normalizedCompanyName, r.industry);
+      }
+      return result;
     }),
   };
 });
@@ -175,6 +209,7 @@ describe("importLinkedInConnections", () => {
 
     expect(summary.contactsCreated).toBe(3);
     expect(summary.titlesClassified).toBe(3);
+    expect(summary.industriesInferred).toBe(3);
 
     const contacts = await testDb.db.query.contact.findMany({
       where: (c, { eq }) => eq(c.source, "linkedin"),
@@ -191,6 +226,8 @@ describe("importLinkedInConnections", () => {
     expect(jeffreyPerson?.linkedinRawTitle).toBe(
       "Director of Product Management - Cloud Platform, Integration, Embedded and API Strategy",
     );
+    expect(jeffreyPerson?.normalizedCompanyName).toBe("Qlik");
+    expect(jeffreyPerson?.industry).toBe("tech_enterprise_software");
     expect(jeffreyPerson?.linkedinRawCompany).toBe("Qlik");
   });
 
@@ -202,8 +239,9 @@ describe("importLinkedInConnections", () => {
 
     expect(second.contactsCreated).toBe(0);
     // Nothing changed since the first import, so no row should have been
-    // queued for (re-)classification.
+    // queued for (re-)classification or (re-)industry-inference.
     expect(second.titlesClassified).toBe(0);
+    expect(second.industriesInferred).toBe(0);
 
     const contacts = await testDb.db.select().from(contact);
     expect(contacts).toHaveLength(3);
@@ -258,6 +296,108 @@ describe("importLinkedInConnections", () => {
       where: (p, { eq }) => eq(p.id, jeffrey!.personId),
     });
     expect(jeffreyPerson?.standardizedTitle).not.toBeNull();
+  });
+
+  it("re-infers industry for a person whose linkedinRawCompany is unchanged but industry was never set", async () => {
+    // Same bug-class as the title regression above, applied to industry:
+    // an interrupted import could persist linkedinRawCompany but never
+    // reach industry inference, leaving industry null forever under a
+    // naive "raw company unchanged" skip.
+    const { rows } = parseConnectionsCsv(SAMPLE_EXPORT);
+    await importLinkedInConnections(testDb.db, rows);
+
+    const jeffrey = await testDb.db.query.contact.findFirst({
+      where: (c, { eq }) =>
+        eq(c.sourceIdentifier, "https://www.linkedin.com/in/goldbergjeffrey"),
+    });
+    await testDb.db.update(person).set({ industry: null }).where(eq(person.id, jeffrey!.personId));
+
+    vi.clearAllMocks();
+    const second = await importLinkedInConnections(testDb.db, rows);
+
+    expect(second.industriesInferred).toBe(1);
+    const jeffreyPerson = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, jeffrey!.personId),
+    });
+    expect(jeffreyPerson?.industry).not.toBeNull();
+  });
+
+  it("infers a company's industry once and backfills it onto other people at that company across separate import calls", async () => {
+    const csvA = `First Name,Last Name,URL,Email Address,Company,Position,Connected On
+Ann,One,https://www.linkedin.com/in/annone,,Qlik,Product Manager,01 Sep 2026
+`;
+    const csvB = `First Name,Last Name,URL,Email Address,Company,Position,Connected On
+Bob,Two,https://www.linkedin.com/in/bobtwo,,Qlik,Engineer,01 Sep 2026
+`;
+
+    await importLinkedInConnections(testDb.db, parseConnectionsCsv(csvA).rows);
+    await importLinkedInConnections(testDb.db, parseConnectionsCsv(csvB).rows);
+
+    const cacheRows = await testDb.db.query.companyIndustryCache.findMany({
+      where: (c, { eq }) => eq(c.normalizedCompanyName, "Qlik"),
+    });
+    // One cache row, not two — the second call's company was already
+    // cached, so no fresh inference (and no duplicate row) happened.
+    expect(cacheRows).toHaveLength(1);
+
+    const bothPeople = await testDb.db.query.contact.findMany({
+      where: (c, { eq }) => eq(c.source, "linkedin"),
+      with: { person: true },
+    });
+    expect(bothPeople).toHaveLength(2);
+    expect(bothPeople.every((c) => c.person?.industry === "tech_enterprise_software")).toBe(true);
+  });
+
+  it("attaches to an existing Person when the row's email matches an existing Gmail contact, without creating a new Person", async () => {
+    const gmailPerson = await testDb.db
+      .insert(person)
+      .values({ name: "Jeffrey Goldberg" })
+      .returning();
+    await testDb.db.insert(contact).values({
+      personId: gmailPerson[0].id,
+      source: "gmail",
+      sourceIdentifier: "jeffrey@example.com",
+      displayName: "Jeffrey Goldberg",
+      status: "active",
+    });
+
+    const csv = SAMPLE_EXPORT.replace(
+      "Jeffrey,Goldberg,https://www.linkedin.com/in/goldbergjeffrey,,Qlik",
+      "Jeffrey,Goldberg,https://www.linkedin.com/in/goldbergjeffrey,jeffrey@example.com,Qlik",
+    );
+    const { rows } = parseConnectionsCsv(csv);
+    const summary = await importLinkedInConnections(testDb.db, rows);
+
+    // A new Contact was created (the LinkedIn one), but no new Person —
+    // it attached to the existing Gmail-sourced Person.
+    expect(summary.contactsCreated).toBe(3);
+    const allPeople = await testDb.db.select().from(person);
+    expect(allPeople).toHaveLength(3); // Jeffrey (pre-existing) + Charu + Rohit (new)
+
+    const linkedinContact = await testDb.db.query.contact.findFirst({
+      where: (c, { eq }) => eq(c.sourceIdentifier, "https://www.linkedin.com/in/goldbergjeffrey"),
+    });
+    expect(linkedinContact?.personId).toBe(gmailPerson[0].id);
+
+    // The LinkedIn-derived fields landed on the pre-existing Person, not
+    // some other newly-created one.
+    const jeffreyPerson = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, gmailPerson[0].id),
+    });
+    expect(jeffreyPerson?.linkedinRawCompany).toBe("Qlik");
+  });
+
+  it("falls back to creating a new Person when the row's email doesn't match any existing Contact", async () => {
+    const csv = SAMPLE_EXPORT.replace(
+      "Jeffrey,Goldberg,https://www.linkedin.com/in/goldbergjeffrey,,Qlik",
+      "Jeffrey,Goldberg,https://www.linkedin.com/in/goldbergjeffrey,unmatched@example.com,Qlik",
+    );
+    const { rows } = parseConnectionsCsv(csv);
+    const summary = await importLinkedInConnections(testDb.db, rows);
+
+    expect(summary.contactsCreated).toBe(3);
+    const allPeople = await testDb.db.select().from(person);
+    expect(allPeople).toHaveLength(3);
   });
 
   it("flows into the source-agnostic merge-suggestion engine like any other Contact", async () => {
@@ -345,6 +485,8 @@ describe("importLinkedInConnections", () => {
           standardizedTitle: p?.standardizedTitle,
           seniority: p?.seniority,
           function: p?.function,
+          normalizedCompanyName: p?.normalizedCompanyName,
+          industry: p?.industry,
         })),
       ).toEqual(
         singleShotPeople.map((p) => ({
@@ -352,6 +494,8 @@ describe("importLinkedInConnections", () => {
           standardizedTitle: p?.standardizedTitle,
           seniority: p?.seniority,
           function: p?.function,
+          normalizedCompanyName: p?.normalizedCompanyName,
+          industry: p?.industry,
         })),
       );
     } finally {

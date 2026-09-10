@@ -187,10 +187,31 @@ export const person = pgTable("person", {
   standardizedTitle: text("standardized_title"),
   seniority: personSeniorityEnum("seniority"),
   function: personFunctionEnum("function"),
+  // Phase 5 (M29): rule-normalized company name (see
+  // company-normalization.ts) — the join key into companyIndustryCache and
+  // what industry backfill matches on. Null iff linkedinRawCompany is null.
+  normalizedCompanyName: text("normalized_company_name"),
+  // Denormalized copy of companyIndustryCache's inference for this
+  // person's company at classification time — a later re-inference of the
+  // same company (out of scope for M29) wouldn't retroactively update this.
+  industry: companyIndustryEnum("industry"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+// Phase 5 (M29): per-company industry cache — industry is inferred once
+// per normalized company name, not once per person, and not re-run for
+// every raw-name variant that happens to normalize to the same company.
+// Keyed independently of any Person row.
+export const companyIndustryCache = pgTable("company_industry_cache", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  normalizedCompanyName: text("normalized_company_name").notNull().unique(),
+  industry: companyIndustryEnum("industry").notNull(),
+  inferredAt: timestamp("inferred_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
 });

@@ -5,11 +5,23 @@ import { contact, event, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
 
 import {
+  mergePersonFields,
+  type MergeablePersonFields,
   mergePersons,
   NothingToUnmergeError,
   PersonNotFoundError,
   unmergePerson,
 } from "./person-merge";
+
+const EMPTY_FIELDS: MergeablePersonFields = {
+  linkedinRawTitle: null,
+  linkedinRawCompany: null,
+  standardizedTitle: null,
+  seniority: null,
+  function: null,
+  normalizedCompanyName: null,
+  industry: null,
+};
 
 async function seedTwoPeople(db: Awaited<ReturnType<typeof createTestDb>>["db"]) {
   const [personA] = await db
@@ -58,6 +70,63 @@ async function seedTwoPeople(db: Awaited<ReturnType<typeof createTestDb>>["db"])
 
   return { personA, contactA, personB, contactB };
 }
+
+describe("mergePersonFields", () => {
+  it("keeps the survivor's value when the survivor already has one", () => {
+    const survivor: MergeablePersonFields = {
+      ...EMPTY_FIELDS,
+      standardizedTitle: "Director of Product Management",
+      seniority: "director",
+    };
+    const absorbed: MergeablePersonFields = {
+      ...EMPTY_FIELDS,
+      standardizedTitle: "Someone Else's Title",
+      seniority: "ic",
+    };
+
+    const merged = mergePersonFields(survivor, absorbed);
+    expect(merged.standardizedTitle).toBe("Director of Product Management");
+    expect(merged.seniority).toBe("director");
+  });
+
+  it("fills in from the absorbed Person when the survivor's value is null", () => {
+    const survivor: MergeablePersonFields = { ...EMPTY_FIELDS };
+    const absorbed: MergeablePersonFields = {
+      ...EMPTY_FIELDS,
+      standardizedTitle: "Director of Product Management",
+      seniority: "director",
+      function: "product_management",
+      linkedinRawTitle: "Director of PM",
+      linkedinRawCompany: "Qlik",
+      normalizedCompanyName: "Qlik",
+      industry: "tech_enterprise_software",
+    };
+
+    const merged = mergePersonFields(survivor, absorbed);
+    expect(merged).toEqual(absorbed);
+  });
+
+  it("stays null when both sides are null", () => {
+    expect(mergePersonFields(EMPTY_FIELDS, EMPTY_FIELDS)).toEqual(EMPTY_FIELDS);
+  });
+
+  it("resolves each field independently rather than all-or-nothing", () => {
+    const survivor: MergeablePersonFields = {
+      ...EMPTY_FIELDS,
+      standardizedTitle: "CEO", // survivor has title...
+      // ...but not industry
+    };
+    const absorbed: MergeablePersonFields = {
+      ...EMPTY_FIELDS,
+      standardizedTitle: "Should not win",
+      industry: "tech_fintech", // absorbed has industry
+    };
+
+    const merged = mergePersonFields(survivor, absorbed);
+    expect(merged.standardizedTitle).toBe("CEO"); // survivor's own wins
+    expect(merged.industry).toBe("tech_fintech"); // filled in from absorbed
+  });
+});
 
 describe("mergePersons", () => {
   let testDb: Awaited<ReturnType<typeof createTestDb>>;
@@ -119,6 +188,64 @@ describe("mergePersons", () => {
   it("throws when asked to merge a Person with itself", async () => {
     const { personA } = await seedTwoPeople(testDb.db);
     await expect(mergePersons(testDb.db, personA.id, personA.id)).rejects.toThrow();
+  });
+
+  it("preserves LinkedIn-derived fields from the absorbed side even though it's about to be deleted", async () => {
+    const { personA, personB } = await seedTwoPeople(testDb.db);
+    // personA ("N. K.") has the shorter name, so it's the absorbed side;
+    // personB ("Nadia Kowalski") survives by name length but starts with
+    // no LinkedIn data of its own.
+    await testDb.db
+      .update(person)
+      .set({
+        linkedinRawTitle: "Director of Product Management",
+        linkedinRawCompany: "Qlik",
+        standardizedTitle: "Director of Product Management",
+        seniority: "director",
+        function: "product_management",
+        normalizedCompanyName: "Qlik",
+        industry: "tech_enterprise_software",
+      })
+      .where(eq(person.id, personA.id));
+
+    const result = await mergePersons(testDb.db, personA.id, personB.id);
+    expect(result.survivingPersonId).toBe(personB.id);
+
+    const survivor = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, result.survivingPersonId),
+    });
+    expect(survivor).toMatchObject({
+      standardizedTitle: "Director of Product Management",
+      seniority: "director",
+      function: "product_management",
+      normalizedCompanyName: "Qlik",
+      industry: "tech_enterprise_software",
+    });
+  });
+
+  it("keeps the survivor's own LinkedIn-derived fields rather than being overwritten by the absorbed side", async () => {
+    const { personA, personB } = await seedTwoPeople(testDb.db);
+    // personB survives by name length; give it its own industry, and give
+    // the about-to-be-deleted personA a different one.
+    await testDb.db
+      .update(person)
+      .set({ standardizedTitle: "VP Engineering", seniority: "vp", industry: "tech_dev_tools_infra" })
+      .where(eq(person.id, personB.id));
+    await testDb.db
+      .update(person)
+      .set({ standardizedTitle: "Should not win", seniority: "ic", industry: "tech_fintech" })
+      .where(eq(person.id, personA.id));
+
+    const result = await mergePersons(testDb.db, personA.id, personB.id);
+
+    const survivor = await testDb.db.query.person.findFirst({
+      where: (p, { eq }) => eq(p.id, result.survivingPersonId),
+    });
+    expect(survivor).toMatchObject({
+      standardizedTitle: "VP Engineering",
+      seniority: "vp",
+      industry: "tech_dev_tools_infra",
+    });
   });
 });
 

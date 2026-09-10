@@ -1,3 +1,5 @@
+import { namesAreNicknameEquivalent } from "@/lib/nickname-equivalence";
+
 export interface ContactForMatching {
   contactId: number;
   personId: number;
@@ -134,6 +136,23 @@ function namesMatchViaSingleInitial(
   return slotIsFullWordMatch(aFirst, bFirst) || slotIsFullWordMatch(aLast, bLast);
 }
 
+// M31: true if the two names have the same first/last "shape" (2 tokens
+// each), the last name matches exactly, and the first names are a known
+// nickname pair (e.g. "Rob Smith" vs "Robert Smith") — see
+// nickname-equivalence.ts. Unlike namesMatchViaSingleInitial, this isn't
+// about abbreviation; it requires an actual known name variant, so it's
+// scored slightly higher (see scoreContactPair).
+function namesMatchViaNickname(nameA: string, nameB: string): boolean {
+  const tokensA = nameA.replace(/\./g, "").split(/\s+/).filter(Boolean);
+  const tokensB = nameB.replace(/\./g, "").split(/\s+/).filter(Boolean);
+  if (tokensA.length !== 2 || tokensB.length !== 2) return false;
+
+  const [aFirst, aLast] = tokensA;
+  const [bFirst, bLast] = tokensB;
+
+  return aLast === bLast && namesAreNicknameEquivalent(aFirst, bFirst);
+}
+
 function scoreContactPair(
   a: ContactForMatching,
   b: ContactForMatching,
@@ -154,6 +173,12 @@ function scoreContactPair(
     if (nameA === nameB) {
       score += 0.6;
       reasons.push("exact_name_match");
+    } else if (namesMatchViaNickname(nameA, nameB)) {
+      // A known nickname substitution (last name exact, first name a
+      // recognized variant) is more specific evidence than a bare
+      // initial, so it scores just above name_initial_match.
+      score += 0.53;
+      reasons.push("name_nickname_match");
     } else if (namesMatchViaSingleInitial(nameA, nameB)) {
       // Weakest of the name-based signals by design — an abbreviated name
       // slot is real evidence, but far less certain than a full match.

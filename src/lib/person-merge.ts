@@ -2,6 +2,8 @@ import { eq } from "drizzle-orm";
 
 import { contact, person } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
+import type { CompanyIndustry } from "@/lib/industry-inference";
+import type { PersonFunction, PersonSeniority } from "@/lib/title-extraction";
 
 export class PersonNotFoundError extends Error {
   constructor(personId: number) {
@@ -15,11 +17,50 @@ export interface MergeResult {
   mergedContactCount: number;
 }
 
+// The LinkedIn-derived fields (Phase 5, M28/M29) that would otherwise be
+// silently lost when the Person carrying them happens to be the absorbed
+// (deleted) side of a merge — mergePersonFields exists specifically to
+// stop that.
+export interface MergeablePersonFields {
+  linkedinRawTitle: string | null;
+  linkedinRawCompany: string | null;
+  standardizedTitle: string | null;
+  seniority: PersonSeniority | null;
+  function: PersonFunction | null;
+  normalizedCompanyName: string | null;
+  industry: CompanyIndustry | null;
+}
+
+// Pure — the survivor's own non-null value wins for each field
+// independently; only a field the survivor has never set (null) falls
+// back to the absorbed Person's value. Without this, mergePersons picking
+// a survivor by name length could delete the one Person who actually had
+// LinkedIn-derived data (title, industry, etc.), silently losing it.
+// Written out field-by-field rather than looping over the key list —
+// TypeScript can't verify a generic `merged[key] = survivor[key] ?? ...`
+// assignment is type-safe across a union of differently-typed fields.
+export function mergePersonFields(
+  survivor: MergeablePersonFields,
+  absorbed: MergeablePersonFields,
+): MergeablePersonFields {
+  return {
+    linkedinRawTitle: survivor.linkedinRawTitle ?? absorbed.linkedinRawTitle,
+    linkedinRawCompany: survivor.linkedinRawCompany ?? absorbed.linkedinRawCompany,
+    standardizedTitle: survivor.standardizedTitle ?? absorbed.standardizedTitle,
+    seniority: survivor.seniority ?? absorbed.seniority,
+    function: survivor.function ?? absorbed.function,
+    normalizedCompanyName: survivor.normalizedCompanyName ?? absorbed.normalizedCompanyName,
+    industry: survivor.industry ?? absorbed.industry,
+  };
+}
+
 // Merges two Persons into one: every Contact (and its Events, by relation)
 // moves to the surviving Person, and the absorbed Person row is deleted.
 // The surviving Person keeps whichever of the two names is longer — a
 // cheap but effective heuristic for "more complete" (e.g. "Vitaly
-// Obernikhin" over "V. O.").
+// Obernikhin" over "V. O.") — and, per mergePersonFields above, whichever
+// side actually has LinkedIn-derived data for each field, independent of
+// which side "won" the name.
 export async function mergePersons(
   db: DrizzleDb,
   personAId: number,
@@ -44,6 +85,12 @@ export async function mergePersons(
     .set({ personId: survivor.id, updatedAt: new Date() })
     .where(eq(contact.personId, absorbed.id))
     .returning({ id: contact.id });
+
+  const mergedFields = mergePersonFields(survivor, absorbed);
+  await db
+    .update(person)
+    .set({ ...mergedFields, updatedAt: new Date() })
+    .where(eq(person.id, survivor.id));
 
   await db.delete(person).where(eq(person.id, absorbed.id));
 

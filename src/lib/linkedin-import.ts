@@ -1,9 +1,17 @@
 import { parse } from "csv-parse/sync";
-import { eq, inArray } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 
-import { person } from "@/db/schema";
+import { companyIndustryCache, person } from "@/db/schema";
 import type { DrizzleDb } from "@/db/types";
-import { findOrCreateContact } from "@/lib/contact-resolution";
+import { normalizeCompanyName } from "@/lib/company-normalization";
+import {
+  attachContactToExistingPerson,
+  findContactByEmail,
+  findContactBySourceIdentifier,
+  findOrCreateContact,
+} from "@/lib/contact-resolution";
+import { bulkUpdateByKey } from "@/lib/db-bulk-update";
+import { inferIndustries } from "@/lib/industry-inference";
 import {
   classifyTitles,
   type TitleClassificationInput,
@@ -24,6 +32,7 @@ export interface LinkedInImportSummary {
   rowsSkippedNoUrl: number;
   contactsCreated: number;
   titlesClassified: number;
+  industriesInferred: number;
 }
 
 const HEADER_MARKER = "First Name,Last Name,URL";
@@ -122,28 +131,82 @@ export function parseConnectionsCsv(csvText: string): {
   return { rows, rowsSkippedNoUrl };
 }
 
+// Runs the industry side of a batch: dedupes company names, resolves
+// each (cache hit or freshly inferred) via inferIndustries, bulk-writes
+// industry onto this batch's own people, then backfills every OTHER
+// existing person at each genuinely-newly-inferred company across the
+// whole DB (not just this batch) — so two people at the same company
+// imported at different times never diverge. The "genuinely new" check
+// (querying the cache before calling inferIndustries) means an
+// already-known company's backfill isn't redundantly re-run on every
+// batch that happens to touch it.
+async function runIndustryInference(
+  db: DrizzleDb,
+  toInferIndustry: { personId: number; normalizedCompanyName: string }[],
+): Promise<number> {
+  if (toInferIndustry.length === 0) return 0;
+
+  const uniqueNames = [...new Set(toInferIndustry.map((r) => r.normalizedCompanyName))];
+  const alreadyCached = await db
+    .select({ normalizedCompanyName: companyIndustryCache.normalizedCompanyName })
+    .from(companyIndustryCache)
+    .where(inArray(companyIndustryCache.normalizedCompanyName, uniqueNames));
+  const alreadyCachedSet = new Set(alreadyCached.map((r) => r.normalizedCompanyName));
+  const newlyInferredCandidates = uniqueNames.filter((n) => !alreadyCachedSet.has(n));
+
+  const industryByCompany = await inferIndustries(db, uniqueNames);
+
+  await bulkUpdateByKey(db, {
+    table: "person",
+    keyColumn: "id",
+    keyType: "integer",
+    setColumns: [{ column: "industry", sqlType: "company_industry" }],
+    rows: toInferIndustry
+      .filter((r) => industryByCompany.has(r.normalizedCompanyName))
+      .map((r) => ({ id: r.personId, industry: industryByCompany.get(r.normalizedCompanyName) })),
+  });
+
+  await bulkUpdateByKey(db, {
+    table: "person",
+    keyColumn: "normalized_company_name",
+    keyType: "text",
+    setColumns: [{ column: "industry", sqlType: "company_industry" }],
+    rows: newlyInferredCandidates
+      .filter((name) => industryByCompany.has(name))
+      .map((name) => ({ normalized_company_name: name, industry: industryByCompany.get(name) })),
+    extraWhere: `t."industry" IS NULL`,
+  });
+
+  return toInferIndustry.length;
+}
+
 // Imports a parsed connections list: one Contact per row (source
 // "linkedin", identifier = profile URL). Re-importing the same connection
 // finds the existing Contact via that identifier (no duplicate created).
 //
 // Each row's raw title/company is diffed against what's already stored on
-// the matched Person (`linkedinRawTitle`/`linkedinRawCompany`) — a row only
-// counts as "unchanged" (skipped entirely, no LLM call) when those fields
-// match *and* `standardizedTitle` is already set; a match on raw fields
-// alone isn't enough, since a person whose raw fields got persisted but
-// never reached classification (e.g. an interrupted import) would
-// otherwise look identical to one that's actually done, and a later
-// re-import would skip them forever. Changed, first-seen, or
-// never-actually-classified rows are batched into classifyTitles (Phase
-// 5/M28), which derives and persists a standardized title, seniority, and
-// function (see docs/title-taxonomy.md). A row with no `position` at all
-// has nothing to classify and is left alone.
+// the matched Person. Two independent conditions decide whether title
+// classification and/or industry inference are needed — a title-unchanged
+// row can still need industry work (or vice versa) if only one of the two
+// changed. Both use the same bug-class fix: "unchanged" requires the raw
+// field to match *and* the derived value (`standardizedTitle`/`industry`)
+// to already be set, not just a raw-field match — otherwise a person whose
+// raw fields got persisted but never reached classification (e.g. an
+// interrupted import) would look identical to one that's actually done,
+// and a later re-import would skip them forever since their raw fields
+// never change again. A row with no `position` at all has nothing to
+// classify and is left out of all further processing (see
+// docs/technical-design-and-milestones.md M29 for why this gate isn't
+// widened to company-only rows).
 //
 // findOrCreateContact still runs one row at a time (each row can create a
-// new Person, so there's no way around a per-row round-trip there), but the
-// diff check is batched into a single query across every resolved Person
-// instead of one `findFirst` per row — with a real ~1,850-row export this
-// was the difference between ~1,850 sequential DB round-trips and 1.
+// new Person, so there's no way around a per-row round-trip there), but
+// every write from here on is a single bulk statement (bulkUpdateByKey)
+// instead of a per-row/per-company loop, and title classification +
+// industry inference run concurrently rather than sequentially — both
+// changes target the same real-world cost: with a real ~1,850-row export,
+// per-row sequential writes (not LLM latency) were the dominant cost of a
+// large import.
 export async function importLinkedInConnections(
   db: DrizzleDb,
   rows: LinkedInConnectionRow[],
@@ -153,20 +216,49 @@ export async function importLinkedInConnections(
     rowsSkippedNoUrl: 0,
     contactsCreated: 0,
     titlesClassified: 0,
+    industriesInferred: 0,
   };
 
   const resolved: { personId: number; position: string; company: string | null }[] = [];
 
   for (const row of rows) {
     const name = `${row.firstName} ${row.lastName}`.trim() || null;
-    const result = await findOrCreateContact(
+
+    // M31: before falling through to findOrCreateContact's "create a new
+    // solo Person" default, check whether this exact LinkedIn identifier
+    // is already resolved (the ordinary re-import fast path), and — only
+    // for a genuinely new identifier — whether the row's email exactly
+    // matches an existing Gmail/Hotmail contact. An exact email match is
+    // unambiguous, so it's safe to attach directly without the manual
+    // /merges review that any name-based match still requires.
+    const existingLinkedinContact = await findContactBySourceIdentifier(
       db,
       "linkedin",
-      { identifier: row.profileUrl, name },
-      // A 1st-degree LinkedIn connection is, by definition, a mutual
-      // relationship — not a one-way message like an unreplied email.
-      "active",
+      row.profileUrl,
     );
+
+    let result: { personId: number; wasCreated: boolean };
+    if (existingLinkedinContact) {
+      result = { personId: existingLinkedinContact.personId, wasCreated: false };
+    } else {
+      const emailMatch = row.email ? await findContactByEmail(db, row.email) : undefined;
+      result = emailMatch
+        ? await attachContactToExistingPerson(
+            db,
+            "linkedin",
+            { identifier: row.profileUrl, name },
+            emailMatch.personId,
+            "active",
+          )
+        : await findOrCreateContact(
+            db,
+            "linkedin",
+            { identifier: row.profileUrl, name },
+            // A 1st-degree LinkedIn connection is, by definition, a mutual
+            // relationship — not a one-way message like an unreplied email.
+            "active",
+          );
+    }
     if (result.wasCreated) summary.contactsCreated += 1;
 
     if (row.position) {
@@ -183,48 +275,79 @@ export async function importLinkedInConnections(
       linkedinRawTitle: person.linkedinRawTitle,
       linkedinRawCompany: person.linkedinRawCompany,
       standardizedTitle: person.standardizedTitle,
+      industry: person.industry,
     })
     .from(person)
     .where(inArray(person.id, personIds));
   const existingById = new Map(existingPeople.map((p) => [p.id, p]));
 
+  const rawFieldUpdates: Record<string, unknown>[] = [];
   const toClassify: TitleClassificationInput[] = [];
+  const toInferIndustry: { personId: number; normalizedCompanyName: string }[] = [];
 
   for (const { personId, position, company } of resolved) {
     const existing = existingById.get(personId);
-    // "Unchanged" must also mean "already classified" — otherwise a person
-    // whose raw title got persisted but never reached classification (e.g.
-    // an interrupted import) looks identical to one that's fully done, and
-    // a later re-import would skip them forever since their raw fields
-    // never change again.
-    const unchanged =
+
+    const titleUnchanged =
       existing?.linkedinRawTitle === position &&
       existing?.linkedinRawCompany === company &&
       existing?.standardizedTitle !== null;
-    if (unchanged) continue;
 
-    await db
-      .update(person)
-      .set({
-        linkedinRawTitle: position,
-        linkedinRawCompany: company,
-        updatedAt: new Date(),
-      })
-      .where(eq(person.id, personId));
+    const normalizedCompany = company ? normalizeCompanyName(company) : null;
+    const companyUnchanged =
+      existing?.linkedinRawCompany === company &&
+      (normalizedCompany === null || existing?.industry !== null);
 
-    toClassify.push({ personId, rawTitle: position, rawCompany: company });
+    if (titleUnchanged && companyUnchanged) continue;
+
+    rawFieldUpdates.push({
+      id: personId,
+      linkedin_raw_title: position,
+      linkedin_raw_company: company,
+      normalized_company_name: normalizedCompany,
+    });
+
+    if (!titleUnchanged) {
+      toClassify.push({ personId, rawTitle: position, rawCompany: company });
+    }
+    if (!companyUnchanged && normalizedCompany) {
+      toInferIndustry.push({ personId, normalizedCompanyName: normalizedCompany });
+    }
   }
 
-  if (toClassify.length > 0) {
-    try {
-      const classified = await classifyTitles(db, toClassify);
-      summary.titlesClassified = classified.length;
-    } catch (err) {
-      console.warn(
-        "[linkedin-import] title classification failed, continuing without it",
-        err,
-      );
-    }
+  await bulkUpdateByKey(db, {
+    table: "person",
+    keyColumn: "id",
+    keyType: "integer",
+    setColumns: [
+      { column: "linkedin_raw_title", sqlType: "text" },
+      { column: "linkedin_raw_company", sqlType: "text" },
+      { column: "normalized_company_name", sqlType: "text" },
+    ],
+    rows: rawFieldUpdates,
+  });
+
+  const [titleResult, industryResult] = await Promise.allSettled([
+    toClassify.length > 0 ? classifyTitles(db, toClassify) : Promise.resolve([]),
+    runIndustryInference(db, toInferIndustry),
+  ]);
+
+  if (titleResult.status === "fulfilled") {
+    summary.titlesClassified = titleResult.value.length;
+  } else {
+    console.warn(
+      "[linkedin-import] title classification failed, continuing without it",
+      titleResult.reason,
+    );
+  }
+
+  if (industryResult.status === "fulfilled") {
+    summary.industriesInferred = industryResult.value;
+  } else {
+    console.warn(
+      "[linkedin-import] industry inference failed, continuing without it",
+      industryResult.reason,
+    );
   }
 
   return summary;

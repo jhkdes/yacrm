@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestDb } from "@/db/test-utils";
 import { contact, event, person } from "@/db/schema";
 import {
+  attachContactToExistingPerson,
+  findContactBySourceIdentifier,
   findOrCreateContact,
   hasOppositeDirectionHistory,
 } from "@/lib/contact-resolution";
@@ -258,3 +260,90 @@ describe("hasOppositeDirectionHistory", () => {
     ).toBe(true);
   });
 });
+
+describe("findContactBySourceIdentifier", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+  });
+
+  it("finds an existing Contact by (source, identifier)", async () => {
+    const created = await findOrCreateContact(testDb.db, "linkedin", {
+      name: "Ada Lovelace",
+      identifier: "https://www.linkedin.com/in/ada",
+    });
+
+    const found = await findContactBySourceIdentifier(
+      testDb.db,
+      "linkedin",
+      "https://www.linkedin.com/in/ada",
+    );
+
+    expect(found).toEqual({ contactId: created.contactId, personId: created.personId });
+  });
+
+  it("returns undefined when no Contact matches", async () => {
+    const found = await findContactBySourceIdentifier(
+      testDb.db,
+      "linkedin",
+      "https://www.linkedin.com/in/nobody",
+    );
+    expect(found).toBeUndefined();
+  });
+
+  it("does not match the same identifier under a different source", async () => {
+    await findOrCreateContact(testDb.db, "gmail", {
+      name: "Ada",
+      identifier: "shared-id",
+    });
+
+    const found = await findContactBySourceIdentifier(testDb.db, "linkedin", "shared-id");
+    expect(found).toBeUndefined();
+  });
+});
+
+describe("attachContactToExistingPerson", () => {
+  let testDb: Awaited<ReturnType<typeof createTestDb>>;
+
+  beforeEach(async () => {
+    testDb = await createTestDb();
+  });
+
+  afterEach(async () => {
+    await testDb.client.close();
+  });
+
+  it("creates a new Contact under the given Person rather than a new Person", async () => {
+    const [existingPerson] = await testDb.db
+      .insert(person)
+      .values({ name: "Ada Lovelace" })
+      .returning();
+
+    const result = await attachContactToExistingPerson(
+      testDb.db,
+      "linkedin",
+      { name: "Ada Lovelace", identifier: "https://www.linkedin.com/in/ada" },
+      existingPerson.id,
+      "active",
+    );
+
+    expect(result.wasCreated).toBe(true);
+    expect(result.personId).toBe(existingPerson.id);
+
+    const allPeople = await testDb.db.select().from(person);
+    expect(allPeople).toHaveLength(1);
+
+    const newContact = await testDb.db.query.contact.findFirst({
+      where: (c, { eq }) => eq(c.id, result.contactId),
+    });
+    expect(newContact?.personId).toBe(existingPerson.id);
+    expect(newContact?.sourceIdentifier).toBe("https://www.linkedin.com/in/ada");
+    expect(newContact?.status).toBe("active");
+  });
+});
+
