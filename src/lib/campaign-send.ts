@@ -121,6 +121,24 @@ export async function sendAllDraftedCampaignEmails(
   return result;
 }
 
+// A LinkedIn recipient's tracked link is plain text pasted into a real
+// LinkedIn message, sent entirely outside this app — so by the time this
+// runs, the actual send already happened. That leaves a window where the
+// recipient (or, far more commonly, LinkedIn's own link-preview-unfurl bot
+// fetching the URL to build a rich preview card the moment the message
+// goes out) hits the tracked link and advances status straight from
+// "drafted" to "opened"/"clicked" before the operator gets back here to
+// mark it sent — see docs/glossary.md's "Tracked link" entry. Those aren't
+// a reason to reject marking sent; they're proof it already went out.
+// Only a recipient already at "sent"/"completed" (already marked, or a
+// genuinely finished funnel) is rejected as not sendable.
+// Exported so the copy-assist queue page's query can list the same
+// recipients this allows marking sent — otherwise one advanced by a click
+// before the operator gets back to it would vanish from the queue instead
+// of just needing "Mark sent" clicked on it.
+export const LINKEDIN_SENDABLE_STATUSES = ["drafted", "opened", "clicked"] as const;
+const ALREADY_SENDABLE_LINKEDIN_STATUSES = new Set<string>(LINKEDIN_SENDABLE_STATUSES);
+
 // M21's LinkedIn "send": there's no API to actually deliver the message
 // (see docs/outreach-roadmap.md's decision to stay within LinkedIn's terms
 // of service — this app never automates a LinkedIn send), so this just
@@ -143,15 +161,20 @@ export async function markLinkedInRecipientSent(
       `channel is "${recipient.channel}", not "linkedin"`,
     );
   }
-  if (recipient.status !== "drafted") {
+  if (!ALREADY_SENDABLE_LINKEDIN_STATUSES.has(recipient.status)) {
     throw new CampaignRecipientNotSendableError(
       recipientId,
       `status is "${recipient.status}", not "drafted"`,
     );
   }
 
+  // Don't regress a status the click/open tracking already advanced past
+  // "sent" — only "drafted" actually needs bumping forward.
   await db
     .update(campaignRecipient)
-    .set({ status: "sent", sentAt: new Date() })
+    .set({
+      status: recipient.status === "drafted" ? "sent" : recipient.status,
+      sentAt: recipient.sentAt ?? new Date(),
+    })
     .where(eq(campaignRecipient.id, recipientId));
 }

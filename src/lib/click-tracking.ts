@@ -23,6 +23,33 @@ export function shouldRecordClick(status: RecipientStatus): boolean {
   return status !== "clicked" && status !== "completed";
 }
 
+// A tracked link pasted as plain text into a LinkedIn (or email) message
+// gets fetched by the sending platform's own link-preview-unfurl bot the
+// moment the message goes out, to build a rich preview card — not by the
+// actual recipient. Substring match against known unfurl-bot user agents,
+// case-insensitive; deliberately conservative (only bots we've actually
+// seen hit this, not a general bot blocklist) since a false positive here
+// just means a real click goes unrecorded, which is the safer failure mode
+// for a metric that only matters as a rough engagement signal.
+const LINK_PREVIEW_BOT_USER_AGENT_SUBSTRINGS = [
+  "linkedinbot",
+  "facebookexternalhit",
+  "slackbot",
+  "twitterbot",
+  "whatsapp",
+  "telegrambot",
+  "discordbot",
+  "redditbot",
+  "skypeuripreview",
+  "embedly",
+];
+
+export function isLinkPreviewBot(userAgent: string | null): boolean {
+  if (!userAgent) return false;
+  const lower = userAgent.toLowerCase();
+  return LINK_PREVIEW_BOT_USER_AGENT_SUBSTRINGS.some((substring) => lower.includes(substring));
+}
+
 export interface ClickResolution {
   redirectUrl: string;
   statusUpdated: boolean;
@@ -44,10 +71,14 @@ export function appendTrackingId(destinationUrl: string, token: string): string 
 // DB-only: looks up the recipient by their tracking token, advances their
 // status if shouldRecordClick says to, and returns where to send them.
 // Never throws on a bad/unknown token — that's just treated as "redirect to
-// the fallback, nothing to update."
+// the fallback, nothing to update." A known link-preview-unfurl bot's
+// user agent still gets redirected normally (its preview card should still
+// work) but never advances the recipient's status — see
+// isLinkPreviewBot's comment for why.
 export async function recordClick(
   db: DrizzleDb,
   token: string,
+  userAgent: string | null = null,
 ): Promise<ClickResolution> {
   const recipient = await db.query.campaignRecipient.findFirst({
     where: eq(campaignRecipient.trackingToken, token),
@@ -60,7 +91,7 @@ export async function recordClick(
 
   const redirectUrl = appendTrackingId(recipient.campaign.destinationUrl, token);
 
-  if (!shouldRecordClick(recipient.status)) {
+  if (!shouldRecordClick(recipient.status) || isLinkPreviewBot(userAgent)) {
     return { redirectUrl, statusUpdated: false };
   }
 

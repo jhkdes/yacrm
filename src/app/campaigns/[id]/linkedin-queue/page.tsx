@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 
 import { markLinkedinRecipientSentAction } from "@/app/actions";
 import { db } from "@/db/client";
+import { LINKEDIN_SENDABLE_STATUSES } from "@/lib/campaign-send";
 
 import { CopyButton } from "./CopyButton";
 
@@ -29,11 +30,11 @@ export default async function LinkedInQueuePage({
       and(eq(c.id, campaignId), isNull(c.deletedAt)),
     with: {
       recipients: {
-        where: (r, { and, eq, isNull }) =>
+        where: (r, { and, eq, inArray, isNull }) =>
           and(
             isNull(r.deletedAt),
             eq(r.channel, "linkedin"),
-            eq(r.status, "drafted"),
+            inArray(r.status, LINKEDIN_SENDABLE_STATUSES),
           ),
         with: { person: true, contact: true },
       },

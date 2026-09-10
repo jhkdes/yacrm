@@ -5,6 +5,7 @@ import { createTestDb } from "@/db/test-utils";
 import {
   appendTrackingId,
   FALLBACK_REDIRECT_PATH,
+  isLinkPreviewBot,
   recordClick,
   shouldRecordClick,
 } from "@/lib/click-tracking";
@@ -36,6 +37,33 @@ describe("shouldRecordClick", () => {
 
   it("never downgrades a completed recipient", () => {
     expect(shouldRecordClick("completed")).toBe(false);
+  });
+});
+
+describe("isLinkPreviewBot", () => {
+  it("recognizes LinkedIn's own link-unfurl bot, case-insensitively", () => {
+    expect(
+      isLinkPreviewBot(
+        "LinkedInBot/1.0 (compatible; Mozilla/5.0; Apache-HttpClient +http://www.linkedin.com)",
+      ),
+    ).toBe(true);
+  });
+
+  it("recognizes other common link-preview bots", () => {
+    expect(isLinkPreviewBot("facebookexternalhit/1.1")).toBe(true);
+    expect(isLinkPreviewBot("Slackbot-LinkExpanding 1.0")).toBe(true);
+  });
+
+  it("does not flag a normal browser", () => {
+    expect(
+      isLinkPreviewBot(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not flag a missing user agent", () => {
+    expect(isLinkPreviewBot(null)).toBe(false);
   });
 });
 
@@ -142,6 +170,22 @@ describe("recordClick", () => {
       where: (r, { eq }) => eq(r.trackingToken, token),
     });
     expect(row?.status).toBe("completed");
+  });
+
+  it("redirects a link-preview bot's fetch but doesn't record it as a click", async () => {
+    const token = await seedRecipient({ status: "sent" });
+
+    const result = await recordClick(testDb.db, token, "LinkedInBot/1.0");
+
+    expect(result).toEqual({
+      redirectUrl: "https://interview.example.com/study?tracking_id=test-token",
+      statusUpdated: false,
+    });
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.trackingToken, token),
+    });
+    expect(row?.status).toBe("sent");
+    expect(row?.clickedAt).toBeNull();
   });
 
   it("falls back and skips the status update when the Campaign has no destinationUrl", async () => {

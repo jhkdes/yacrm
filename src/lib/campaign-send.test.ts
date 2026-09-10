@@ -403,4 +403,53 @@ describe("markLinkedInRecipientSent", () => {
       markLinkedInRecipientSent(testDb.db, recipient.id),
     ).rejects.toThrow(CampaignRecipientNotSendableError);
   });
+
+  // The tracked link pasted into a real LinkedIn message gets sent outside
+  // this app, so a recipient can reach "opened"/"clicked" (a real click, or
+  // — far more commonly — LinkedIn's own link-preview-unfurl bot fetching
+  // the URL) before the operator gets back here to mark it sent. That's
+  // proof it already went out, not a reason to reject the mark-sent.
+  it("marks a clicked recipient sent without regressing their status", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+    await testDb.db
+      .update(campaignRecipient)
+      .set({ status: "clicked", clickedAt: new Date() })
+      .where(eq(campaignRecipient.id, recipient.id));
+
+    await markLinkedInRecipientSent(testDb.db, recipient.id);
+
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq: eqOp }) => eqOp(r.id, recipient.id),
+    });
+    expect(row?.status).toBe("clicked");
+    expect(row?.sentAt).toBeInstanceOf(Date);
+  });
+
+  it("marks an opened recipient sent without regressing their status", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+    await testDb.db
+      .update(campaignRecipient)
+      .set({ status: "opened" })
+      .where(eq(campaignRecipient.id, recipient.id));
+
+    await markLinkedInRecipientSent(testDb.db, recipient.id);
+
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq: eqOp }) => eqOp(r.id, recipient.id),
+    });
+    expect(row?.status).toBe("opened");
+    expect(row?.sentAt).toBeInstanceOf(Date);
+  });
+
+  it("throws for a completed recipient", async () => {
+    const recipient = await seedDraftedLinkedInRecipient();
+    await testDb.db
+      .update(campaignRecipient)
+      .set({ status: "completed" })
+      .where(eq(campaignRecipient.id, recipient.id));
+
+    await expect(
+      markLinkedInRecipientSent(testDb.db, recipient.id),
+    ).rejects.toThrow(CampaignRecipientNotSendableError);
+  });
 });

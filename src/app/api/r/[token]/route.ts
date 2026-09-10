@@ -12,7 +12,7 @@ export async function GET(
   { params }: { params: Promise<{ token: string }> },
 ) {
   const { token } = await params;
-  const { redirectUrl } = await recordClick(db, token);
+  const { redirectUrl } = await recordClick(db, token, request.headers.get("user-agent"));
 
   return NextResponse.redirect(new URL(redirectUrl, request.url));
 }
