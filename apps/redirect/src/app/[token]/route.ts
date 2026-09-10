@@ -14,7 +14,12 @@ export async function GET(
   const { token } = await params;
   const fallbackUrl = new URL("/", request.url).toString();
 
-  const { redirectUrl } = await recordClick(getPool(), token, fallbackUrl);
+  const { redirectUrl } = await recordClick(
+    getPool(),
+    token,
+    fallbackUrl,
+    request.headers.get("user-agent"),
+  );
 
   return NextResponse.redirect(redirectUrl);
 }
