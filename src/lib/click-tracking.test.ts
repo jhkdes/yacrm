@@ -4,6 +4,7 @@ import { campaign, campaignRecipient, contact, person } from "@/db/schema";
 import { createTestDb } from "@/db/test-utils";
 import {
   appendTrackingId,
+  CLICK_GRACE_WINDOW_MS,
   FALLBACK_REDIRECT_PATH,
   isLinkPreviewBot,
   recordClick,
@@ -83,6 +84,7 @@ describe("recordClick", () => {
     status?: "drafted" | "sent" | "opened" | "clicked" | "completed";
     clickedAt?: Date;
     trackingToken?: string;
+    firstSeenAt?: Date;
   } = {}) {
     const [p] = await testDb.db.insert(person).values({ name: "Ada" }).returning();
     const [c] = await testDb.db.insert(contact).values({
@@ -113,6 +115,7 @@ describe("recordClick", () => {
       draftBody: "body",
       trackingToken: token,
       clickedAt: overrides.clickedAt,
+      firstSeenAt: overrides.firstSeenAt,
     });
     return token;
   }
@@ -186,6 +189,62 @@ describe("recordClick", () => {
     });
     expect(row?.status).toBe("sent");
     expect(row?.clickedAt).toBeNull();
+  });
+
+  it("sets firstSeenAt on the very first hit, even a real one, and still records the click", async () => {
+    const token = await seedRecipient({ status: "sent" });
+
+    const result = await recordClick(testDb.db, token);
+
+    expect(result.statusUpdated).toBe(true);
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.trackingToken, token),
+    });
+    expect(row?.firstSeenAt).toBeInstanceOf(Date);
+    expect(row?.status).toBe("clicked");
+  });
+
+  it("sets firstSeenAt even when the very first hit is itself bot-suppressed", async () => {
+    const token = await seedRecipient({ status: "sent" });
+
+    await recordClick(testDb.db, token, "LinkedInBot/1.0");
+
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.trackingToken, token),
+    });
+    expect(row?.firstSeenAt).toBeInstanceOf(Date);
+    expect(row?.status).toBe("sent");
+  });
+
+  it("suppresses a second hit seconds after the first, even with a normal browser user agent", async () => {
+    const firstSeenAt = new Date(Date.now() - 30_000); // 30s ago, within the grace window
+    const token = await seedRecipient({ status: "sent", firstSeenAt });
+
+    const result = await recordClick(
+      testDb.db,
+      token,
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/143.0 Safari/537.36",
+    );
+
+    expect(result.statusUpdated).toBe(false);
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.trackingToken, token),
+    });
+    expect(row?.status).toBe("sent");
+    expect(row?.clickedAt).toBeNull();
+  });
+
+  it("records a hit past the grace window as a real click", async () => {
+    const firstSeenAt = new Date(Date.now() - (CLICK_GRACE_WINDOW_MS + 60_000)); // 1 min past the window
+    const token = await seedRecipient({ status: "sent", firstSeenAt });
+
+    const result = await recordClick(testDb.db, token, "some real browser");
+
+    expect(result.statusUpdated).toBe(true);
+    const row = await testDb.db.query.campaignRecipient.findFirst({
+      where: (r, { eq }) => eq(r.trackingToken, token),
+    });
+    expect(row?.status).toBe("clicked");
   });
 
   it("falls back and skips the status update when the Campaign has no destinationUrl", async () => {

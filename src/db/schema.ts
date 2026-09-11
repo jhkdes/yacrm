@@ -334,6 +334,12 @@ export const campaignRecipient = pgTable(
     openedAt: timestamp("opened_at", { withTimezone: true }),
     clickedAt: timestamp("clicked_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    // The very first GET this token ever received, bot or not — the
+    // anchor recordClick (src/lib/click-tracking.ts) uses to tell a real
+    // click apart from automated preview/security-scan infrastructure that
+    // hits the link within seconds of it being sent but doesn't always
+    // self-identify via User-Agent.
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }),
     // Independent of `status` — a follow-up doesn't move a recipient
     // backward through the funnel, it's an orthogonal "we nudged them" fact
     // (see M23 in docs/technical-design-and-milestones.md).

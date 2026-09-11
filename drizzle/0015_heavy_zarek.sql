@@ -1,0 +1,1 @@
+ALTER TABLE "campaign_recipient" ADD COLUMN "first_seen_at" timestamp with time zone;

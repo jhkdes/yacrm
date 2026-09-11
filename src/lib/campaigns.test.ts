@@ -215,6 +215,13 @@ describe("addRecipients", () => {
 
     await addRecipients(testDb.db, campaignId, [{ personId }], "email");
     const [original] = await testDb.db.select().from(campaignRecipient);
+    // Simulates the original link having already received a click-tracking
+    // hit before it was removed — the revived row must not inherit this
+    // grace-window anchor along with its old (soon-to-be-replaced) token.
+    await testDb.db
+      .update(campaignRecipient)
+      .set({ firstSeenAt: new Date() })
+      .where(eq(campaignRecipient.id, original.id));
     await removeRecipient(testDb.db, campaignId, original.id);
 
     const result = await addRecipients(
@@ -230,6 +237,7 @@ describe("addRecipients", () => {
     expect(rows[0].id).toBe(original.id);
     expect(rows[0].deletedAt).toBeNull();
     expect(rows[0].trackingToken).not.toBe(original.trackingToken);
+    expect(rows[0].firstSeenAt).toBeNull();
   });
 
   it("throws for a soft-deleted Campaign, the same as a missing one", async () => {

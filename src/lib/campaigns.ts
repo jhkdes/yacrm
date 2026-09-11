@@ -149,6 +149,7 @@ export async function addRecipients(
         draftSubject: draft.draft.subject,
         draftBody,
         trackingToken,
+        firstSeenAt: null,
       })
       .onConflictDoUpdate({
         target: [campaignRecipient.campaignId, campaignRecipient.personId],
@@ -160,6 +161,10 @@ export async function addRecipients(
           draftSubject: draft.draft.subject,
           draftBody,
           trackingToken,
+          // A revived recipient gets a brand-new trackingToken (a new
+          // link) above, so any grace-window anchor from the old link
+          // must not carry over — see click-tracking.ts's recordClick.
+          firstSeenAt: null,
         },
         // Only a previously-removed (soft-deleted) row gets revived. An
         // already-active row hits this branch too (same unique key) but the

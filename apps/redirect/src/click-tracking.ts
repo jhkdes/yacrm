@@ -49,6 +49,17 @@ export function isLinkPreviewBot(userAgent: string | null): boolean {
   return LINK_PREVIEW_BOT_USER_AGENT_SUBSTRINGS.some((substring) => lower.includes(substring));
 }
 
+// Deliberately duplicated from the main app's src/lib/click-tracking.ts —
+// see that file's comment for the full rationale. UA matching alone isn't
+// enough: a real production log showed this app's own deployment receive
+// a self-identifying LinkedInBot fetch, then a second, ordinary-looking
+// Chrome/Mac request 23s later from a different network path — almost
+// certainly a headless-browser safety scan that deliberately doesn't
+// self-identify. Timing catches what identity can't: any request after a
+// token's first-ever hit, within this window of it, is treated as
+// automated regardless of its UA.
+export const CLICK_GRACE_WINDOW_MS = 2 * 60 * 1000;
+
 export interface ClickResolution {
   redirectUrl: string;
   statusUpdated: boolean;
@@ -58,6 +69,7 @@ interface RecipientRow {
   id: number;
   status: RecipientStatus;
   destination_url: string | null;
+  first_seen_at: string | null;
 }
 
 // Tags the destination with our tracking token as a `tracking_id` query
@@ -72,12 +84,13 @@ export function appendTrackingId(destinationUrl: string, token: string): string 
 }
 
 // Looks up the recipient by their tracking token, advances their status if
-// shouldRecordClick says to, and returns where to send them. Never throws
-// on a bad/unknown token or a campaign with no destination_url — both just
-// mean "redirect to the fallback, nothing to update." A known link-
-// preview-unfurl bot's user agent still gets redirected normally (its
-// preview card should still work) but never advances the recipient's
-// status.
+// shouldRecordClick (and the bot/grace-window checks below) say to, and
+// returns where to send them. Never throws on a bad/unknown token or a
+// campaign with no destination_url — both just mean "redirect to the
+// fallback, nothing to update." A known link-preview-unfurl bot's user
+// agent, or any request within CLICK_GRACE_WINDOW_MS of this token's
+// first-ever hit, still gets redirected normally but never advances the
+// recipient's status.
 export async function recordClick(
   pool: Pool,
   token: string,
@@ -85,7 +98,7 @@ export async function recordClick(
   userAgent: string | null = null,
 ): Promise<ClickResolution> {
   const { rows } = await pool.query<RecipientRow>(
-    `SELECT cr.id, cr.status, c.destination_url
+    `SELECT cr.id, cr.status, c.destination_url, cr.first_seen_at
      FROM campaign_recipient cr
      JOIN campaign c ON c.id = cr.campaign_id
      WHERE cr.tracking_token = $1
@@ -99,14 +112,31 @@ export async function recordClick(
   }
 
   const redirectUrl = appendTrackingId(recipient.destination_url, token);
+  const now = new Date();
 
-  if (!shouldRecordClick(recipient.status) || isLinkPreviewBot(userAgent)) {
+  // The very first hit this token has ever received sets the anchor —
+  // but is still evaluated normally (not auto-suppressed), so a single
+  // genuinely fast real click with no preceding bot fetch is still
+  // recorded. Only a *later* hit close behind it is treated as automated.
+  const isFirstHitEver = recipient.first_seen_at === null;
+  if (isFirstHitEver) {
+    await pool.query(`UPDATE campaign_recipient SET first_seen_at = $1 WHERE id = $2`, [
+      now,
+      recipient.id,
+    ]);
+  }
+  const withinGraceOfFirstHit =
+    !isFirstHitEver &&
+    recipient.first_seen_at !== null &&
+    now.getTime() - new Date(recipient.first_seen_at).getTime() < CLICK_GRACE_WINDOW_MS;
+
+  if (!shouldRecordClick(recipient.status) || isLinkPreviewBot(userAgent) || withinGraceOfFirstHit) {
     return { redirectUrl, statusUpdated: false };
   }
 
   await pool.query(
-    `UPDATE campaign_recipient SET status = 'clicked', clicked_at = now() WHERE id = $1`,
-    [recipient.id],
+    `UPDATE campaign_recipient SET status = 'clicked', clicked_at = $2 WHERE id = $1`,
+    [recipient.id, now],
   );
 
   return { redirectUrl, statusUpdated: true };

@@ -50,6 +50,18 @@ export function isLinkPreviewBot(userAgent: string | null): boolean {
   return LINK_PREVIEW_BOT_USER_AGENT_SUBSTRINGS.some((substring) => lower.includes(substring));
 }
 
+// UA matching alone isn't enough — real production logs show LinkedIn
+// following its self-identifying LinkedInBot preview fetch with a second,
+// unrelated-looking request (ordinary Chrome/Mac UA, different network
+// path) seconds later, almost certainly a headless-browser safety scan
+// that deliberately doesn't self-identify to dodge UA blocklists. A real
+// recipient can't plausibly read a message and click within seconds of it
+// being sent, so timing catches what identity can't: any request after a
+// token's first-ever hit, within this window of it, is treated as
+// automated regardless of its UA. A real tradeoff, not free — a
+// genuinely fast real click inside this window also goes unrecorded.
+export const CLICK_GRACE_WINDOW_MS = 2 * 60 * 1000;
+
 export interface ClickResolution {
   redirectUrl: string;
   statusUpdated: boolean;
@@ -69,12 +81,14 @@ export function appendTrackingId(destinationUrl: string, token: string): string 
 }
 
 // DB-only: looks up the recipient by their tracking token, advances their
-// status if shouldRecordClick says to, and returns where to send them.
-// Never throws on a bad/unknown token — that's just treated as "redirect to
-// the fallback, nothing to update." A known link-preview-unfurl bot's
-// user agent still gets redirected normally (its preview card should still
-// work) but never advances the recipient's status — see
-// isLinkPreviewBot's comment for why.
+// status if shouldRecordClick (and the bot/grace-window checks below) say
+// to, and returns where to send them. Never throws on a bad/unknown token
+// — that's just treated as "redirect to the fallback, nothing to update."
+// A known link-preview-unfurl bot's user agent, or any request within
+// CLICK_GRACE_WINDOW_MS of this token's first-ever hit, still gets
+// redirected normally (its preview card should still work, and a real
+// recipient's click still lands them on the destination either way) but
+// never advances the recipient's status.
 export async function recordClick(
   db: DrizzleDb,
   token: string,
@@ -90,14 +104,31 @@ export async function recordClick(
   }
 
   const redirectUrl = appendTrackingId(recipient.campaign.destinationUrl, token);
+  const now = new Date();
 
-  if (!shouldRecordClick(recipient.status) || isLinkPreviewBot(userAgent)) {
+  // The very first hit this token has ever received sets the anchor —
+  // but is still evaluated normally (not auto-suppressed), so a single
+  // genuinely fast real click with no preceding bot fetch is still
+  // recorded. Only a *later* hit close behind it is treated as automated.
+  const isFirstHitEver = recipient.firstSeenAt === null;
+  if (isFirstHitEver) {
+    await db
+      .update(campaignRecipient)
+      .set({ firstSeenAt: now })
+      .where(eq(campaignRecipient.id, recipient.id));
+  }
+  const withinGraceOfFirstHit =
+    !isFirstHitEver &&
+    recipient.firstSeenAt !== null &&
+    now.getTime() - recipient.firstSeenAt.getTime() < CLICK_GRACE_WINDOW_MS;
+
+  if (!shouldRecordClick(recipient.status) || isLinkPreviewBot(userAgent) || withinGraceOfFirstHit) {
     return { redirectUrl, statusUpdated: false };
   }
 
   await db
     .update(campaignRecipient)
-    .set({ status: "clicked", clickedAt: new Date() })
+    .set({ status: "clicked", clickedAt: now })
     .where(eq(campaignRecipient.id, recipient.id));
 
   return { redirectUrl, statusUpdated: true };
